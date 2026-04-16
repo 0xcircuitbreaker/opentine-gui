@@ -1,7 +1,7 @@
 [project]
 name = "opentine-gui"
 version = "0.1.0"
-description = "Desktop GUI for opentine — visual management console with Dear PyGui + imnodes"
+description = "Desktop GUI for opentine — visual management console built with Dear PyGui"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"

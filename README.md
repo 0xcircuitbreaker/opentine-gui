@@ -1,6 +1,6 @@
 # opentine-gui
 
-Desktop GUI for [opentine](https://github.com/0xcircuitbreaker/opentine) — visual management console with Dear PyGui.
+Desktop GUI for [opentine](https://github.com/0xcircuitbreaker/opentine) — visual management console built with Dear PyGui.
 
 ## Install
 
@@ -8,30 +8,50 @@ Desktop GUI for [opentine](https://github.com/0xcircuitbreaker/opentine) — vis
 pip install opentine-gui
 ```
 
+Or from source with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync
+uv run tine-gui
+```
+
 ## Usage
 
 ```bash
-tine-gui
+tine-gui                # reads ./.tine_runs
+tine-gui path/to/runs   # point at a different runs directory
 ```
 
 ## Features
 
-- Run list table with status colors
-- Step DAG visualization
-- Run detail panel (cost, duration, model, prompt)
-- Menu bar with Refresh and Quit
+- Run list with status colors (running / paused / completed / failed)
+- Step DAG rendered as a real node editor (parent → child links, per-kind colors, minimap)
+- Run detail + selected-step detail (inputs, outputs, cost, duration, model)
+- Live auto-refresh — picks up new `.tine` files while agents run
+- Run actions: Pause / Resume / Fork-from-step (writes back to the runs dir)
+- File menu: Refresh, Change runs dir, Quit
+- Corrupt `.tine` files surfaced as load errors, not silently dropped
 
 ## Layout
 
 ```
-┌─ Menu: [Refresh] [Quit] ──────────────────────────────────────┐
-│ ┌── Runs ──────┐ ┌── Details ──────┐ ┌── Step DAG ──────────┐ │
-│ │ a3f8 complete│ │ Run: a3f8       │ │ [0] think: I'll...   │ │
-│ │ b7c1 complete│ │ Model: claude   │ │ [1] tool: search(..) │ │
-│ │ c9d2 running │ │ Steps: 4        │ │ [2] think: The...    │ │
-│ │              │ │ Cost: $0.003    │ │ [3] done: The mass.. │ │
-│ └──────────────┘ └─────────────────┘ └───────────────────────┘ │
-└────────────────────────────────────────────────────────────────┘
+┌─ File   Run ─────────────────────────────────────────────────────┐
+│ ┌── Runs ──────┐ ┌── Run ──────────┐ ┌── Step DAG ────────────┐ │
+│ │ a3f8 complete│ │ id, model, cost │ │  ┌─think─┐   ┌─tool──┐ │ │
+│ │ b7c1 complete│ │ steps, duration │ │  │ plan  │──▶│search │ │ │
+│ │ c9d2 running │ │ prompt          │ │  └───────┘   └───────┘ │ │
+│ │              │ │ ── Step ──      │ │                        │ │
+│ │              │ │ inputs/outputs  │ │                        │ │
+│ └──────────────┘ └─────────────────┘ └────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+## Development
+
+```bash
+uv sync --extra dev
+uv run pytest
+uvx ruff check opentine_gui tests
 ```
 
 ## License

@@ -105,6 +105,28 @@ def test_fork_requires_step_selection(tmp_path: Path) -> None:
     assert list(tmp_path.glob("*.tine")) == []
 
 
+def test_select_run_updates_detail_state(tmp_path: Path) -> None:
+    gui = _gui(tmp_path)
+    run = _make_run("abc")
+    gui._runs = [run]
+    gui._selected_step = run.steps[0]
+    with (
+        patch("opentine_gui.app.dpg.set_value"),
+        patch.object(gui, "_show_run_detail") as show_detail,
+        patch.object(gui, "_rebuild_dag") as rebuild_dag,
+        patch.object(gui, "_render_run_table") as render_table,
+        patch.object(gui, "_update_action_state") as update_actions,
+    ):
+        gui._select_run("abc")
+
+    assert gui._selected_run == run
+    assert gui._selected_step is None
+    show_detail.assert_called_once_with(run)
+    rebuild_dag.assert_called_once_with(run)
+    render_table.assert_called_once()
+    update_actions.assert_called_once()
+
+
 def test_pause_rejects_unsafe_run_id(tmp_path: Path) -> None:
     gui = _gui(tmp_path)
     evil = _make_run("abc", RunStatus.running)

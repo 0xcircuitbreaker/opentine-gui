@@ -54,6 +54,8 @@ uv run pytest
 uvx ruff check opentine_gui tests
 ```
 
+Manual GUI QA coverage lives in [docs/gui-qa.md](docs/gui-qa.md).
+
 ## License
 
 Apache 2.0

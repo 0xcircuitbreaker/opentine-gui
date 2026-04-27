@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 from opentine.core import Run, RunStatus, Step, StepKind
 
-from opentine_gui.app import MAX_TINE_BYTES, _safe_run_path, load_runs
+from opentine_gui.app import (
+    MAX_TINE_BYTES,
+    _format_value,
+    _mapping_lines,
+    _run_matches_filter,
+    _safe_run_path,
+    load_runs,
+)
 
 
 def _make_run(run_id: str, prompt: str = "hi") -> Run:
@@ -138,3 +145,24 @@ def test_safe_run_path_resolved_stays_inside(tmp_path: Path) -> None:
     # Confirm legitimate ID resolves under runs_dir.
     p = _safe_run_path(tmp_path, "legit")
     assert tmp_path.resolve() in p.parents
+
+
+def test_run_filter_matches_status_prompt_and_step_payload() -> None:
+    run = _make_run("demo-search", prompt="Build a timeline")
+    assert _run_matches_filter(run, "completed")
+    assert _run_matches_filter(run, "timeline")
+    assert _run_matches_filter(run, "search")
+    assert not _run_matches_filter(run, "missing")
+
+
+def test_format_value_pretty_prints_nested_data() -> None:
+    rendered = _format_value({"b": 2, "a": {"nested": True}}, 200)
+    assert '"a": {' in rendered
+    assert '"nested": true' in rendered
+
+
+def test_mapping_lines_handles_empty_and_nested_values() -> None:
+    assert _mapping_lines({}) == ["  (none)"]
+    lines = _mapping_lines({"arguments": {"q": "x"}})
+    assert lines[0] == "  arguments:"
+    assert any('"q": "x"' in line for line in lines)

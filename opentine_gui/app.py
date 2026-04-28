@@ -9,6 +9,7 @@ Layout:
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -50,6 +51,33 @@ RUN_STATUS_COLORS: dict[RunStatus, list[int]] = {
 
 DEFAULT_RUNS_DIR = Path(".tine_runs")
 AUTO_REFRESH_SECONDS = 2.0
+PREFERENCES_ENV = "OPENTINE_GUI_PREFS"
+PREFERENCES_FILE = "preferences.json"
+
+
+def _preferences_path() -> Path:
+    override = os.environ.get(PREFERENCES_ENV)
+    if override:
+        return Path(override).expanduser()
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_home / "opentine-gui" / PREFERENCES_FILE
+
+
+def _load_preferences(path: Path | None = None) -> dict[str, str]:
+    path = path or _preferences_path()
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v) for k, v in raw.items() if isinstance(v, str)}
+
+
+def _save_preferences(preferences: dict[str, str], path: Path | None = None) -> None:
+    path = path or _preferences_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(preferences, indent=2, sort_keys=True) + "\n")
 
 
 def load_runs(
@@ -102,15 +130,21 @@ def _dir_signature(runs_dir: Path) -> tuple[tuple[str, float, int], ...]:
 
 
 class OpentineGUI:
-    def __init__(self, runs_dir: Path = DEFAULT_RUNS_DIR) -> None:
-        self._runs_dir = runs_dir
+    def __init__(self, runs_dir: Path | None = None) -> None:
+        self._preferences = _load_preferences()
+        preferred_dir = self._preferences.get("last_runs_dir")
+        if runs_dir is None and preferred_dir:
+            self._runs_dir = Path(preferred_dir).expanduser()
+        else:
+            self._runs_dir = runs_dir or DEFAULT_RUNS_DIR
         self._runs: list[Run] = []
         self._errors: list[str] = []
         self._selected_run: Run | None = None
         self._selected_step: Step | None = None
         self._last_signature: tuple = ()
         self._last_check: float = 0.0
-        self._run_filter = ""
+        self._run_filter = self._preferences.get("last_filter", "").strip().lower()
+        self._step_filter = ""
 
     def run(self) -> None:
         dpg.create_context()
@@ -167,9 +201,11 @@ class OpentineGUI:
             dpg.add_input_text(
                 hint="Search id, status, model, prompt, steps...",
                 tag="run_filter",
+                default_value=self._run_filter,
                 width=300,
                 callback=self._on_filter_change,
             )
+            dpg.add_text("", tag="run_summary", wrap=300, color=[180, 180, 180])
             with dpg.group(horizontal=True):
                 dpg.add_button(
                     label="Pause", callback=self._pause_selected, tag="btn_pause", width=92
@@ -208,6 +244,15 @@ class OpentineGUI:
     def _build_dag_panel(self) -> None:
         with dpg.child_window(border=False):
             dpg.add_text("Step DAG", color=BRAND)
+            dpg.add_text("", tag="dag_summary", wrap=580, color=[180, 180, 180])
+            with dpg.group(horizontal=True):
+                dpg.add_input_text(
+                    hint="Highlight step id, kind, tool, payload...",
+                    tag="step_filter",
+                    width=360,
+                    callback=self._on_step_filter_change,
+                )
+                dpg.add_button(label="Clear", callback=self._clear_step_filter, width=70)
             dpg.add_separator()
             with dpg.node_editor(
                 tag="dag_editor",
@@ -280,16 +325,21 @@ class OpentineGUI:
                 )
                 dpg.add_text(run.status.value, color=color)
                 dpg.add_text(f"${run.total_cost:.4f}")
+        dpg.set_value("run_summary", _run_list_summary(self._runs, visible_runs, self._run_filter))
         if not visible_runs:
             with dpg.table_row(parent="run_table"):
-                dpg.add_text("No runs match filter", color=[150, 150, 150])
+                msg = "No runs match filter" if self._run_filter else "No .tine runs found"
+                dpg.add_text(msg, color=[150, 150, 150])
                 dpg.add_text("")
                 dpg.add_text("")
 
     def _render_errors(self) -> None:
         if self._errors:
             dpg.configure_item("err_header", show=True)
-            dpg.set_value("err_text", "\n".join(self._errors[:10]))
+            shown = self._errors[:10]
+            if len(self._errors) > len(shown):
+                shown.append(f"...and {len(self._errors) - len(shown)} more")
+            dpg.set_value("err_text", "\n".join(shown))
         else:
             dpg.configure_item("err_header", show=False)
             dpg.set_value("err_text", "")
@@ -318,10 +368,30 @@ class OpentineGUI:
 
     def _on_filter_change(self, sender, app_data) -> None:
         self._run_filter = (app_data or "").strip().lower()
+        self._persist_preferences()
         self._render_run_table()
         self._update_action_state()
         shown = len(self._filtered_runs())
         self._set_status(f"{self._runs_dir} - {shown}/{len(self._runs)} run(s) shown")
+
+    def _on_step_filter_change(self, sender, app_data) -> None:
+        self._step_filter = (app_data or "").strip().lower()
+        if self._selected_run:
+            self._rebuild_dag(self._selected_run)
+        matches = (
+            _matching_steps(self._selected_run, self._step_filter)
+            if self._selected_run
+            else []
+        )
+        if self._step_filter:
+            self._set_status(f"{len(matches)} step(s) highlighted for '{self._step_filter}'")
+
+    def _clear_step_filter(self) -> None:
+        self._step_filter = ""
+        if dpg.does_item_exist("step_filter"):
+            dpg.set_value("step_filter", "")
+        if self._selected_run:
+            self._rebuild_dag(self._selected_run)
 
     def _filtered_runs(self) -> list[Run]:
         return [run for run in self._runs if _run_matches_filter(run, self._run_filter)]
@@ -346,6 +416,7 @@ class OpentineGUI:
         kind_counts: dict[str, int] = {}
         for step in run.steps:
             kind_counts[step.kind.value] = kind_counts.get(step.kind.value, 0) + 1
+        stats = _graph_stats(run)
         lines = [
             f"Run: {run.id}",
             f"Model: {run.model_info or '(none)'}",
@@ -353,6 +424,11 @@ class OpentineGUI:
             f"Created: {_format_timestamp(run.created_at)}",
             f"Steps: {len(run.steps)}",
             f"Step kinds: {_format_counts(kind_counts)}",
+            (
+                "Graph: "
+                f"{stats['roots']} root(s), {stats['links']} link(s), "
+                f"{stats['branches']} branch point(s), depth {stats['max_depth']}"
+            ),
             f"Cost: ${run.total_cost:.4f}",
             f"Duration: {run.total_duration:.1f}s",
             "",
@@ -383,15 +459,28 @@ class OpentineGUI:
     def _clear_dag(self) -> None:
         for child in dpg.get_item_children("dag_editor", slot=1) or []:
             dpg.delete_item(child)
+        if dpg.does_item_exist("dag_summary"):
+            dpg.set_value("dag_summary", "Select a run to inspect its opentine step graph.")
 
     def _rebuild_dag(self, run: Run) -> None:
         self._clear_dag()
+        matches = set(_matching_steps(run, self._step_filter))
+        stats = _graph_stats(run)
+        filter_note = (
+            f" - {len(matches)}/{len(run.steps)} highlighted"
+            if self._step_filter
+            else ""
+        )
+        dpg.set_value(
+            "dag_summary",
+            (
+                f"{len(run.steps)} step(s), {stats['links']} link(s), "
+                f"{stats['branches']} branch point(s), depth {stats['max_depth']}{filter_note}"
+            ),
+        )
         in_attr: dict[str, int] = {}
         out_attr: dict[str, int] = {}
-        depth: dict[str, int] = {}
-        for step in run.steps:
-            d = 0 if step.parent_id is None else depth.get(step.parent_id, 0) + 1
-            depth[step.id] = d
+        depth = _step_depths(run)
         by_depth: dict[int, int] = {}
         for step in run.steps:
             d = depth[step.id]
@@ -399,7 +488,9 @@ class OpentineGUI:
             by_depth[d] = col + 1
             pos = [80 + d * 240, 40 + col * 110]
             color = STEP_COLORS.get(step.kind, [255, 255, 255])
-            label = _node_label(step)
+            if self._step_filter and step.id not in matches:
+                color = [max(60, c // 3) for c in color]
+            label = _node_label(step, highlighted=bool(self._step_filter and step.id in matches))
             node_id = dpg.add_node(
                 parent="dag_editor",
                 label=label,
@@ -462,10 +553,14 @@ class OpentineGUI:
         new_dir = Path(dpg.get_value("dir_picker_input")).expanduser()
         self._runs_dir = new_dir
         self._run_filter = ""
+        self._step_filter = ""
         self._selected_run = None
         self._selected_step = None
         if dpg.does_item_exist("run_filter"):
             dpg.set_value("run_filter", "")
+        if dpg.does_item_exist("step_filter"):
+            dpg.set_value("step_filter", "")
+        self._persist_preferences()
         dpg.set_value("detail_text", "Select a run")
         dpg.set_value("step_text", "Select a step in the DAG")
         self._clear_dag()
@@ -522,6 +617,14 @@ class OpentineGUI:
         self._refresh()
         self._set_status(f"Forked {run.id}@{step.id} -> {new_run.id}")
 
+    def _persist_preferences(self) -> None:
+        self._preferences["last_runs_dir"] = str(self._runs_dir)
+        self._preferences["last_filter"] = self._run_filter
+        try:
+            _save_preferences(self._preferences)
+        except OSError as e:
+            self._set_status(f"Preferences not saved: {e}")
+
 
 _NODE_THEMES: dict[tuple[int, int, int], int] = {}
 
@@ -549,15 +652,98 @@ def _node_theme(color: list[int]) -> int:
     return theme
 
 
-def _node_label(step: Step) -> str:
+def _node_label(step: Step, *, highlighted: bool = False) -> str:
     kind = step.kind.value
+    prefix = "* " if highlighted else ""
     if step.kind == StepKind.tool:
         name = step.inputs.get("name", "?")
-        return f"{kind}: {name}"
-    text = step.inputs.get("text") or ""
+        return f"{prefix}{kind}: {_truncate(name, 34)}"
+    if step.kind == StepKind.error:
+        text = (
+            step.inputs.get("message")
+            or step.outputs.get("error")
+            or step.inputs.get("text")
+            or ""
+        )
+    elif step.kind == StepKind.done:
+        text = step.outputs.get("answer") or step.outputs.get("text") or ""
+    elif step.kind == StepKind.model:
+        text = step.outputs.get("text") or step.inputs.get("text") or ""
+    else:
+        text = step.inputs.get("text") or ""
     if text:
-        return f"{kind}: {_truncate(text, 40)}"
-    return f"{kind}: {step.id[:8]}"
+        return f"{prefix}{kind}: {_truncate(text, 40)}"
+    return f"{prefix}{kind}: {step.id[:8]}"
+
+
+def _step_depths(run: Run) -> dict[str, int]:
+    by_id = {step.id: step for step in run.steps}
+    memo: dict[str, int] = {}
+
+    def depth(step: Step, seen: set[str]) -> int:
+        if step.id in memo:
+            return memo[step.id]
+        if not step.parent_id or step.parent_id not in by_id or step.id in seen:
+            memo[step.id] = 0
+            return 0
+        seen.add(step.id)
+        memo[step.id] = depth(by_id[step.parent_id], seen) + 1
+        seen.remove(step.id)
+        return memo[step.id]
+
+    for step in run.steps:
+        depth(step, set())
+    return memo
+
+
+def _graph_stats(run: Run) -> dict[str, int]:
+    step_ids = {step.id for step in run.steps}
+    child_counts: dict[str, int] = {}
+    links = 0
+    roots = 0
+    for step in run.steps:
+        if step.parent_id and step.parent_id in step_ids:
+            links += 1
+            child_counts[step.parent_id] = child_counts.get(step.parent_id, 0) + 1
+        else:
+            roots += 1
+    depths = _step_depths(run)
+    return {
+        "roots": roots,
+        "links": links,
+        "branches": sum(1 for count in child_counts.values() if count > 1),
+        "max_depth": max(depths.values(), default=0),
+    }
+
+
+def _run_list_summary(runs: list[Run], visible_runs: list[Run], query: str) -> str:
+    if not runs:
+        return "No .tine runs loaded. Change directory or wait for agents to write runs."
+    status_counts: dict[str, int] = {}
+    for run in visible_runs:
+        status_counts[run.status.value] = status_counts.get(run.status.value, 0) + 1
+    total_cost = sum(run.total_cost for run in visible_runs)
+    shown = f"{len(visible_runs)}/{len(runs)} shown" if query else f"{len(runs)} run(s)"
+    counts = _format_counts(status_counts)
+    return f"{shown} - {counts} - visible cost ${total_cost:.4f}"
+
+
+def _matching_steps(run: Run | None, query: str) -> list[str]:
+    if not run or not query:
+        return []
+    return [step.id for step in run.steps if _step_matches_filter(step, query)]
+
+
+def _step_matches_filter(step: Step, query: str) -> bool:
+    haystack = [
+        step.id,
+        step.kind.value,
+        step.parent_id or "",
+        step.model_info,
+        _format_value(step.inputs, 500),
+        _format_value(step.outputs, 500),
+    ]
+    return query in "\n".join(haystack).lower()
 
 
 def _run_matches_filter(run: Run, query: str) -> bool:
@@ -625,6 +811,6 @@ def _truncate(v: object, n: int) -> str:
     return s if len(s) <= n else s[: n - 3] + "..."
 
 
-def run_app(runs_dir: Path | str = DEFAULT_RUNS_DIR) -> None:
-    gui = OpentineGUI(Path(runs_dir))
+def run_app(runs_dir: Path | str | None = None) -> None:
+    gui = OpentineGUI(Path(runs_dir) if runs_dir is not None else None)
     gui.run()

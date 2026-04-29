@@ -12,6 +12,7 @@ from opentine_gui.app import (
     MAX_TINE_BYTES,
     _format_value,
     _graph_stats,
+    _highlight_summary,
     _mapping_lines,
     _matching_steps,
     _node_label,
@@ -192,6 +193,7 @@ def test_graph_stats_describe_branched_run() -> None:
 def test_step_filter_and_labels_support_graph_search() -> None:
     run = _make_run("demo-search")
     assert _matching_steps(run, "search") == ["s2"]
+    assert _highlight_summary(run, {"s2"}) == "Matches: tool: search"
     assert _node_label(run.steps[1], highlighted=True) == "* tool: search"
 
     done = Step(

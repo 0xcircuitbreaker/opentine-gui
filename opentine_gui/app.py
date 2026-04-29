@@ -247,10 +247,11 @@ class OpentineGUI:
             dpg.add_text("", tag="dag_summary", wrap=580, color=[180, 180, 180])
             with dpg.group(horizontal=True):
                 dpg.add_input_text(
-                    hint="Highlight step id, kind, tool, payload...",
+                    hint="Highlight step id, kind, tool, payload... press Enter",
                     tag="step_filter",
                     width=360,
                     callback=self._on_step_filter_change,
+                    on_enter=True,
                 )
                 dpg.add_button(label="Clear", callback=self._clear_step_filter, width=70)
             dpg.add_separator()
@@ -376,13 +377,16 @@ class OpentineGUI:
 
     def _on_step_filter_change(self, sender, app_data) -> None:
         self._step_filter = (app_data or "").strip().lower()
-        if self._selected_run:
-            self._rebuild_dag(self._selected_run)
         matches = (
             _matching_steps(self._selected_run, self._step_filter)
             if self._selected_run
             else []
         )
+        if self._selected_run and dpg.does_item_exist("dag_summary"):
+            dpg.set_value(
+                "dag_summary",
+                _dag_summary(self._selected_run, self._step_filter, matches),
+            )
         if self._step_filter:
             self._set_status(f"{len(matches)} step(s) highlighted for '{self._step_filter}'")
 
@@ -390,8 +394,8 @@ class OpentineGUI:
         self._step_filter = ""
         if dpg.does_item_exist("step_filter"):
             dpg.set_value("step_filter", "")
-        if self._selected_run:
-            self._rebuild_dag(self._selected_run)
+        if self._selected_run and dpg.does_item_exist("dag_summary"):
+            dpg.set_value("dag_summary", _dag_summary(self._selected_run))
 
     def _filtered_runs(self) -> list[Run]:
         return [run for run in self._runs if _run_matches_filter(run, self._run_filter)]
@@ -464,20 +468,7 @@ class OpentineGUI:
 
     def _rebuild_dag(self, run: Run) -> None:
         self._clear_dag()
-        matches = set(_matching_steps(run, self._step_filter))
-        stats = _graph_stats(run)
-        filter_note = (
-            f" - {len(matches)}/{len(run.steps)} highlighted"
-            if self._step_filter
-            else ""
-        )
-        dpg.set_value(
-            "dag_summary",
-            (
-                f"{len(run.steps)} step(s), {stats['links']} link(s), "
-                f"{stats['branches']} branch point(s), depth {stats['max_depth']}{filter_note}"
-            ),
-        )
+        dpg.set_value("dag_summary", _dag_summary(run))
         in_attr: dict[str, int] = {}
         out_attr: dict[str, int] = {}
         depth = _step_depths(run)
@@ -488,9 +479,7 @@ class OpentineGUI:
             by_depth[d] = col + 1
             pos = [80 + d * 240, 40 + col * 110]
             color = STEP_COLORS.get(step.kind, [255, 255, 255])
-            if self._step_filter and step.id not in matches:
-                color = [max(60, c // 3) for c in color]
-            label = _node_label(step, highlighted=bool(self._step_filter and step.id in matches))
+            label = _node_label(step)
             node_id = dpg.add_node(
                 parent="dag_editor",
                 label=label,
@@ -728,10 +717,33 @@ def _run_list_summary(runs: list[Run], visible_runs: list[Run], query: str) -> s
     return f"{shown} - {counts} - visible cost ${total_cost:.4f}"
 
 
+def _dag_summary(run: Run, query: str = "", matches: set[str] | None = None) -> str:
+    stats = _graph_stats(run)
+    summary = (
+        f"{len(run.steps)} step(s), {stats['links']} link(s), "
+        f"{stats['branches']} branch point(s), depth {stats['max_depth']}"
+    )
+    if not query:
+        return summary
+    matched = matches or set(_matching_steps(run, query))
+    return f"{summary} - {len(matched)}/{len(run.steps)} match query '{query}'"
+
+
 def _matching_steps(run: Run | None, query: str) -> list[str]:
     if not run or not query:
         return []
     return [step.id for step in run.steps if _step_matches_filter(step, query)]
+
+
+def _highlight_summary(run: Run, matches: set[str]) -> str:
+    if not matches:
+        return "No matching steps"
+    labels = [
+        _truncate(_node_label(step).replace("* ", "", 1), 48)
+        for step in run.steps
+        if step.id in matches
+    ]
+    return "Matches: " + ", ".join(labels[:6])
 
 
 def _step_matches_filter(step: Step, query: str) -> bool:

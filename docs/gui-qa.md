@@ -25,8 +25,8 @@ Use a disposable runs directory with:
   graph summary, total cost, total duration, prompt, and fork origin when present.
 - [x] DAG nodes show kind-specific color, clearer kind-specific labels, duration,
   cost, parent-child links, minimap, and an Inspect action.
-- [x] DAG search highlights matching steps by id, kind, model, tool name, and
-  input/output payload.
+- [x] DAG search reports matching steps by id, kind, model, tool name, and
+  input/output payload in the graph summary/status area.
 - [x] Selecting a step shows formatted inputs and outputs.
 - [x] Pause is enabled only for running runs and writes the paused status to disk.
 - [x] Resume is enabled only for paused runs and writes the running status to disk.
@@ -58,8 +58,8 @@ Use a disposable runs directory with:
   headless pytest suite.
 - The DAG is readable for small and medium runs; very large runs will need
   clustering, pan-to-selection, and graph search to feel like a high-end wiki UI.
-- DAG search now highlights matching nodes, but it does not pan/zoom to matches
-  or provide next/previous match navigation.
+- DAG search now reports matching nodes, but it does not pan/zoom to matches,
+  visually highlight nodes, or provide next/previous match navigation.
 - There is no persistent user preference layer for window size or panel widths.
 - Wiki-style traceability is limited to opentine run/step metadata. Future
   high-end passes should add richer source/citation links when opentine records

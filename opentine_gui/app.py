@@ -30,26 +30,54 @@ def _safe_run_path(runs_dir: Path, run_id: str) -> Path:
         raise ValueError(f"path escapes runs dir: {target}")
     return target
 
-BRAND = [255, 105, 0]
-BRAND_DIM = [204, 85, 0]
+BRAND = [120, 164, 255]
+BRAND_DIM = [84, 117, 184]
+
+SURFACE_APP = [31, 30, 27]
+SURFACE_SIDEBAR = [25, 24, 20]
+SURFACE_PANEL = [35, 34, 31]
+SURFACE_CARD = [39, 38, 34]
+SURFACE_INPUT = [31, 30, 27]
+SURFACE_BUTTON = [52, 50, 45]
+
+TEXT_PRIMARY = [230, 225, 216]
+TEXT_SECONDARY = [184, 177, 166]
+TEXT_MUTED = [127, 119, 109]
+TEXT_FAINT = [98, 91, 83]
+
+BORDER_DEFAULT = [52, 50, 45]
+BORDER_STRONG = [70, 67, 59]
+STATE_HOVER = [45, 43, 39]
+STATE_SELECTED = [30, 52, 76]
+STATE_ACTIVE = [32, 58, 85]
+
+ACCENT_GREEN = [121, 216, 157]
+ACCENT_ORANGE = [243, 161, 91]
+ACCENT_RED = [255, 138, 134]
+ACCENT_PURPLE = [182, 156, 255]
+ACCENT_TEAL = [100, 209, 200]
+ACCENT_YELLOW = [242, 200, 107]
 
 STEP_COLORS: dict[StepKind, list[int]] = {
-    StepKind.think: [255, 255, 100],
+    StepKind.think: ACCENT_YELLOW,
     StepKind.tool: BRAND,
-    StepKind.model: [100, 200, 255],
-    StepKind.done: [100, 200, 100],
-    StepKind.error: [255, 80, 80],
+    StepKind.model: ACCENT_TEAL,
+    StepKind.done: ACCENT_GREEN,
+    StepKind.error: ACCENT_RED,
 }
 
 RUN_STATUS_COLORS: dict[RunStatus, list[int]] = {
-    RunStatus.running: [0, 188, 212],
-    RunStatus.paused: [255, 152, 0],
-    RunStatus.completed: [100, 200, 100],
-    RunStatus.failed: [255, 80, 80],
+    RunStatus.running: BRAND,
+    RunStatus.paused: ACCENT_ORANGE,
+    RunStatus.completed: ACCENT_GREEN,
+    RunStatus.failed: ACCENT_RED,
 }
 
 DEFAULT_RUNS_DIR = Path(".tine_runs")
 AUTO_REFRESH_SECONDS = 2.0
+
+_APP_THEME: int | None = None
+_BUTTON_THEMES: dict[str, int] = {}
 
 
 def load_runs(
@@ -114,7 +142,8 @@ class OpentineGUI:
 
     def run(self) -> None:
         dpg.create_context()
-        dpg.create_viewport(title="opentine — agent run console", width=1400, height=800)
+        dpg.bind_theme(_app_theme())
+        dpg.create_viewport(title="opentine - agent run console", width=1440, height=860)
 
         with dpg.window(tag="primary"):
             with dpg.menu_bar():
@@ -135,12 +164,15 @@ class OpentineGUI:
                         callback=self._fork_selected,
                         tag="menu_fork",
                     )
-                dpg.add_text("", tag="status_bar", color=[180, 180, 180])
-
+            self._build_top_bar()
             with dpg.group(horizontal=True):
                 self._build_run_list()
                 self._build_detail_panel()
                 self._build_dag_panel()
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_text("", tag="status_bar", color=TEXT_SECONDARY)
+                dpg.add_text("", tag="status_meta", color=TEXT_MUTED)
 
         with dpg.window(label="Change runs directory", modal=True, show=False,
                         tag="dir_picker", width=500, height=120, no_resize=True):
@@ -161,29 +193,33 @@ class OpentineGUI:
             dpg.render_dearpygui_frame()
         dpg.destroy_context()
 
+    def _build_top_bar(self) -> None:
+        with dpg.group(horizontal=True):
+            dpg.add_text("opentine", color=TEXT_PRIMARY)
+            dpg.add_text("agent run console", color=TEXT_MUTED)
+            dpg.add_spacer(width=20)
+            dpg.add_text(str(self._runs_dir), tag="top_runs_dir", color=TEXT_MUTED)
+        dpg.add_separator()
+
     def _build_run_list(self) -> None:
-        with dpg.child_window(width=320, border=False):
-            dpg.add_text("Runs", color=BRAND)
+        with dpg.child_window(width=340, border=True):
+            _panel_header("Runs", "Search, select, and manage traces")
             dpg.add_input_text(
-                hint="Search id, status, model, prompt, steps...",
+                hint="Search id, status, model, prompt, steps",
                 tag="run_filter",
-                width=300,
+                width=-1,
                 callback=self._on_filter_change,
             )
             with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label="Pause", callback=self._pause_selected, tag="btn_pause", width=92
-                )
-                dpg.add_button(
-                    label="Resume", callback=self._resume_selected, tag="btn_resume", width=92
-                )
-                dpg.add_button(
-                    label="Fork", callback=self._fork_selected, tag="btn_fork", width=92
-                )
-            dpg.add_text("Click a run id to inspect its DAG.", color=[150, 150, 150])
+                _action_button("Pause", self._pause_selected, "btn_pause")
+                _action_button("Resume", self._resume_selected, "btn_resume")
+                _action_button("Fork", self._fork_selected, "btn_fork")
             dpg.add_separator()
             with dpg.table(
                 header_row=True,
+                borders_innerH=True,
+                borders_outerH=True,
+                row_background=True,
                 resizable=False,
                 policy=dpg.mvTable_SizingStretchProp,
                 tag="run_table",
@@ -192,22 +228,30 @@ class OpentineGUI:
                 dpg.add_table_column(label="Status")
                 dpg.add_table_column(label="Cost")
             dpg.add_separator()
-            dpg.add_text("Load errors:", color=[255, 180, 80], tag="err_header", show=False)
-            dpg.add_text("", tag="err_text", wrap=300, color=[255, 180, 80])
+            dpg.add_text("Load errors", color=ACCENT_ORANGE, tag="err_header", show=False)
+            dpg.add_text("", tag="err_text", wrap=312, color=ACCENT_ORANGE)
 
     def _build_detail_panel(self) -> None:
-        with dpg.child_window(width=460, border=False):
-            dpg.add_text("Run", color=BRAND)
+        with dpg.child_window(width=480, border=True):
+            _panel_header("Run inspector", "Trace metadata and prompt")
             dpg.add_separator()
-            dpg.add_text("Select a run", tag="detail_text", wrap=440)
+            dpg.add_text("Select a run", tag="detail_text", wrap=452, color=TEXT_SECONDARY)
             dpg.add_spacer(height=10)
-            dpg.add_text("Step", color=BRAND)
+            _panel_header("Step inspector", "Inputs, outputs, timing, and cost")
             dpg.add_separator()
-            dpg.add_text("Select a step in the DAG", tag="step_text", wrap=440)
+            dpg.add_text(
+                "Select a step in the DAG",
+                tag="step_text",
+                wrap=452,
+                color=TEXT_SECONDARY,
+            )
 
     def _build_dag_panel(self) -> None:
-        with dpg.child_window(border=False):
-            dpg.add_text("Step DAG", color=BRAND)
+        with dpg.child_window(border=True):
+            _panel_header("Step DAG", "Parent-child execution graph")
+            with dpg.group(horizontal=True):
+                for kind in StepKind:
+                    dpg.add_text(kind.value, color=STEP_COLORS[kind])
             dpg.add_separator()
             with dpg.node_editor(
                 tag="dag_editor",
@@ -219,7 +263,8 @@ class OpentineGUI:
                 pass
 
     def _set_status(self, msg: str) -> None:
-        dpg.set_value("status_bar", msg)
+        if dpg.does_item_exist("status_bar"):
+            dpg.set_value("status_bar", msg)
 
     def _auto_refresh_tick(self) -> None:
         now = time.monotonic()
@@ -256,6 +301,10 @@ class OpentineGUI:
         self._update_action_state()
         visible_count = len(self._filtered_runs())
         filter_note = f", {visible_count} shown" if self._run_filter else ""
+        if dpg.does_item_exist("top_runs_dir"):
+            dpg.set_value("top_runs_dir", str(self._runs_dir))
+        if dpg.does_item_exist("status_meta"):
+            dpg.set_value("status_meta", time.strftime("%H:%M:%S"))
         self._set_status(
             f"{self._runs_dir} - {len(self._runs)} run(s){filter_note}"
             + (f", {len(self._errors)} error(s)" if self._errors else "")
@@ -521,6 +570,102 @@ class OpentineGUI:
         self._selected_step = None
         self._refresh()
         self._set_status(f"Forked {run.id}@{step.id} -> {new_run.id}")
+
+
+def _rgba(color: list[int], alpha: int = 255) -> list[int]:
+    return [color[0], color[1], color[2], alpha]
+
+
+def _app_theme() -> int:
+    global _APP_THEME
+    if _APP_THEME is not None:
+        return _APP_THEME
+    with dpg.theme() as theme:
+        with dpg.theme_component(dpg.mvAll):
+            for target, color in (
+                (dpg.mvThemeCol_WindowBg, SURFACE_APP),
+                (dpg.mvThemeCol_ChildBg, SURFACE_PANEL),
+                (dpg.mvThemeCol_PopupBg, SURFACE_CARD),
+                (dpg.mvThemeCol_MenuBarBg, SURFACE_SIDEBAR),
+                (dpg.mvThemeCol_Text, TEXT_PRIMARY),
+                (dpg.mvThemeCol_TextDisabled, TEXT_FAINT),
+                (dpg.mvThemeCol_Border, BORDER_DEFAULT),
+                (dpg.mvThemeCol_FrameBg, SURFACE_INPUT),
+                (dpg.mvThemeCol_FrameBgHovered, STATE_HOVER),
+                (dpg.mvThemeCol_FrameBgActive, STATE_ACTIVE),
+                (dpg.mvThemeCol_Button, SURFACE_BUTTON),
+                (dpg.mvThemeCol_ButtonHovered, STATE_HOVER),
+                (dpg.mvThemeCol_ButtonActive, STATE_ACTIVE),
+                (dpg.mvThemeCol_Header, STATE_SELECTED),
+                (dpg.mvThemeCol_HeaderHovered, STATE_ACTIVE),
+                (dpg.mvThemeCol_HeaderActive, STATE_ACTIVE),
+                (dpg.mvThemeCol_TableHeaderBg, SURFACE_SIDEBAR),
+                (dpg.mvThemeCol_TableBorderStrong, BORDER_STRONG),
+                (dpg.mvThemeCol_TableBorderLight, BORDER_DEFAULT),
+                (dpg.mvThemeCol_Separator, BORDER_DEFAULT),
+                (dpg.mvThemeCol_ScrollbarBg, SURFACE_APP),
+                (dpg.mvThemeCol_ScrollbarGrab, SURFACE_BUTTON),
+                (dpg.mvThemeCol_CheckMark, BRAND),
+            ):
+                dpg.add_theme_color(target, _rgba(color), category=dpg.mvThemeCat_Core)
+            for target, x, y in (
+                (dpg.mvStyleVar_WindowPadding, 12, 10),
+                (dpg.mvStyleVar_FramePadding, 8, 5),
+                (dpg.mvStyleVar_ItemSpacing, 8, 7),
+                (dpg.mvStyleVar_ItemInnerSpacing, 6, 5),
+            ):
+                dpg.add_theme_style(target, x, y, category=dpg.mvThemeCat_Core)
+            for target, value in (
+                (dpg.mvStyleVar_WindowBorderSize, 0),
+                (dpg.mvStyleVar_ChildBorderSize, 1),
+                (dpg.mvStyleVar_FrameRounding, 6),
+                (dpg.mvStyleVar_ChildRounding, 8),
+                (dpg.mvStyleVar_GrabRounding, 6),
+                (dpg.mvStyleVar_ScrollbarSize, 12),
+            ):
+                dpg.add_theme_style(target, value, category=dpg.mvThemeCat_Core)
+    _APP_THEME = theme
+    return theme
+
+
+def _button_theme(kind: str = "ghost") -> int:
+    if kind in _BUTTON_THEMES:
+        return _BUTTON_THEMES[kind]
+
+    colors = {
+        "ghost": (SURFACE_PANEL, STATE_HOVER, STATE_ACTIVE, TEXT_SECONDARY),
+        "primary": (BRAND_DIM, BRAND, STATE_ACTIVE, TEXT_PRIMARY),
+    }.get(kind, (SURFACE_BUTTON, STATE_HOVER, STATE_ACTIVE, TEXT_PRIMARY))
+
+    with dpg.theme() as theme:
+        with dpg.theme_component(dpg.mvButton):
+            dpg.add_theme_color(
+                dpg.mvThemeCol_Button,
+                _rgba(colors[0]),
+                category=dpg.mvThemeCat_Core,
+            )
+            dpg.add_theme_color(
+                dpg.mvThemeCol_ButtonHovered, _rgba(colors[1]), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_color(
+                dpg.mvThemeCol_ButtonActive, _rgba(colors[2]), category=dpg.mvThemeCat_Core
+            )
+            dpg.add_theme_color(dpg.mvThemeCol_Text, _rgba(colors[3]), category=dpg.mvThemeCat_Core)
+            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 6, category=dpg.mvThemeCat_Core)
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 8, 4, category=dpg.mvThemeCat_Core)
+    _BUTTON_THEMES[kind] = theme
+    return theme
+
+
+def _panel_header(title: str, subtitle: str) -> None:
+    dpg.add_text(title, color=TEXT_PRIMARY)
+    dpg.add_text(subtitle, color=TEXT_MUTED)
+
+
+def _action_button(label: str, callback, tag: str) -> int | str:
+    item = dpg.add_button(label=label, callback=callback, tag=tag, width=96)
+    dpg.bind_item_theme(item, _button_theme("ghost"))
+    return item
 
 
 _NODE_THEMES: dict[tuple[int, int, int], int] = {}

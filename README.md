@@ -18,7 +18,7 @@ uv run tine-gui
 ## Usage
 
 ```bash
-tine-gui                # reads ./.tine_runs
+tine-gui                # reads last used dir, then ./.tine_runs
 tine-gui path/to/runs   # point at a different runs directory
 ```
 
@@ -27,10 +27,12 @@ tine-gui path/to/runs   # point at a different runs directory
 - Run list with status colors (running / paused / completed / failed)
 - Step DAG rendered as a real node editor (parent → child links, per-kind colors, minimap)
 - Run detail + selected-step detail (inputs, outputs, cost, duration, model)
+- Graph summaries and DAG search feedback for wiki-style trace navigation
 - Live auto-refresh — picks up new `.tine` files while agents run
 - Run actions: Pause / Resume / Fork-from-step (writes back to the runs dir)
 - File menu: Refresh, Change runs dir, Quit
 - Corrupt `.tine` files surfaced as load errors, not silently dropped
+- Lightweight local preferences for the last runs directory and run search filter
 
 ## Layout
 

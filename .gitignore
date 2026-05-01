@@ -7,3 +7,5 @@ build/
 .ruff_cache/
 .pytest_cache/
 .claude/
+.tmp_gui_qa_runs/
+.tmp_tolaria_reference/

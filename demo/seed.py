@@ -39,7 +39,12 @@ def _step(
 
 def completed_linear() -> Run:
     steps = [
-        _step("s1", None, StepKind.think, {"text": "Plan the search strategy for Tine benchmarks."}),
+        _step(
+            "s1",
+            None,
+            StepKind.think,
+            {"text": "Plan the search strategy for Tine benchmarks."},
+        ),
         _step(
             "s2", "s1", StepKind.tool,
             {"name": "web_search", "arguments": {"q": "tine benchmark 2026"}},

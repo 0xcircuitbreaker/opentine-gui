@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
-from opentine.core import Run, RunStatus, Step, StepKind
+from opentine.core import Graph, Run, RunStatus, Step, StepKind
 
 from opentine_gui.app import (
     MAX_TINE_BYTES,
@@ -22,40 +22,40 @@ from opentine_gui.app import (
 )
 
 
+def _run_with_steps(run_id: str, steps: list[Step], **fields) -> Run:
+    graph = Graph()
+    for step in steps:
+        graph.add(step)
+    return Run(id=run_id, graph=graph, **fields)
+
+
 def _make_run(run_id: str, prompt: str = "hi") -> Run:
     steps = [
         Step(
             id="s1",
-            parent_id=None,
+            parent_ids=[],
             kind=StepKind.think,
             inputs={"text": "plan"},
-            outputs={},
-            model_info="",
-            timestamp=0.0,
             duration=0.1,
-            cost=0.0,
         ),
         Step(
             id="s2",
-            parent_id="s1",
+            parent_ids=["s1"],
             kind=StepKind.tool,
             inputs={"name": "search", "arguments": {"q": "x"}},
             outputs={"result": "ok"},
-            model_info="",
+            tool_info={"name": "search"},
             timestamp=0.1,
             duration=0.2,
             cost=0.001,
         ),
     ]
-    return Run(
-        id=run_id,
-        steps=steps,
+    return _run_with_steps(
+        run_id,
+        steps,
         status=RunStatus.completed,
         model_info="claude-sonnet-4-6",
-        system_prompt="",
         user_prompt=prompt,
-        created_at=0.0,
-        metadata={},
     )
 
 
@@ -173,21 +173,34 @@ def test_mapping_lines_handles_empty_and_nested_values() -> None:
 
 
 def test_graph_stats_describe_branched_run() -> None:
-    run = _make_run("branched")
-    run.steps.append(
+    steps = [
+        Step(id="s1", parent_ids=[], kind=StepKind.think, inputs={"text": "plan"}),
+        Step(id="s2", parent_ids=["s1"], kind=StepKind.tool, inputs={"name": "search"}),
         Step(
             id="s3",
-            parent_id="s1",
+            parent_ids=["s1"],
             kind=StepKind.model,
             inputs={"text": "other branch"},
             outputs={"text": "summary"},
             model_info="m",
-            timestamp=0.2,
             duration=0.3,
             cost=0.002,
-        )
-    )
+        ),
+    ]
+    run = _run_with_steps("branched", steps)
     assert _graph_stats(run) == {"roots": 1, "links": 2, "branches": 1, "max_depth": 1}
+
+
+def test_graph_stats_counts_multi_parent_merge() -> None:
+    # s3 merges two parents -> two links into one node, depth 2.
+    steps = [
+        Step(id="s1", parent_ids=[], kind=StepKind.think, inputs={"text": "plan"}),
+        Step(id="s2a", parent_ids=["s1"], kind=StepKind.tool, inputs={"name": "a"}),
+        Step(id="s2b", parent_ids=["s1"], kind=StepKind.tool, inputs={"name": "b"}),
+        Step(id="s3", parent_ids=["s2a", "s2b"], kind=StepKind.done, inputs={"text": "merged"}),
+    ]
+    run = _run_with_steps("merge", steps)
+    assert _graph_stats(run) == {"roots": 1, "links": 4, "branches": 1, "max_depth": 2}
 
 
 def test_step_filter_and_labels_support_graph_search() -> None:
@@ -198,13 +211,47 @@ def test_step_filter_and_labels_support_graph_search() -> None:
 
     done = Step(
         id="s3",
-        parent_id="s2",
+        parent_ids=["s2"],
         kind=StepKind.done,
         inputs={},
         outputs={"answer": "final answer"},
-        model_info="",
-        timestamp=0.2,
-        duration=0.0,
-        cost=0.0,
     )
     assert _node_label(done) == "done: final answer"
+
+    # done text may live in inputs (opentine's runtime writes it there)
+    done_inputs = Step(id="s4", parent_ids=["s3"], kind=StepKind.done, inputs={"text": "all set"})
+    assert _node_label(done_inputs) == "done: all set"
+
+    # error steps carry their message in step.error, not inputs
+    err = Step(
+        id="e1",
+        parent_ids=["s2"],
+        kind=StepKind.error,
+        inputs={},
+        error={"type": "ValueError", "message": "boom"},
+    )
+    assert _node_label(err) == "error: boom"
+
+
+def test_step_filter_matches_tool_info_and_error() -> None:
+    steps = [
+        Step(id="s1", parent_ids=[], kind=StepKind.think, inputs={"text": "plan"}),
+        Step(
+            id="s2",
+            parent_ids=["s1"],
+            kind=StepKind.tool,
+            inputs={"arguments": {"q": "x"}},
+            tool_info={"name": "web_search"},
+        ),
+        Step(
+            id="s3",
+            parent_ids=["s2"],
+            kind=StepKind.error,
+            inputs={},
+            error={"type": "TimeoutError", "message": "upstream timed out"},
+        ),
+    ]
+    run = _run_with_steps("searchable", steps)
+    assert _matching_steps(run, "web_search") == ["s2"]
+    assert _matching_steps(run, "timeout") == ["s3"]
+    assert _run_matches_filter(run, "upstream timed out")

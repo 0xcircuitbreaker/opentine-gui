@@ -5,44 +5,31 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from opentine.core import Run, RunStatus, Step, StepKind
+from opentine.core import Graph, Run, RunStatus, Step, StepKind
 
 from opentine_gui.app import OpentineGUI
 
 
 def _make_run(run_id: str, status: RunStatus = RunStatus.running) -> Run:
+    graph = Graph()
+    graph.add(Step(id="s1", parent_ids=[], kind=StepKind.think, inputs={"text": "plan"}))
+    graph.add(
+        Step(
+            id="s2",
+            parent_ids=["s1"],
+            kind=StepKind.done,
+            inputs={},
+            outputs={"answer": "42"},
+            timestamp=0.1,
+            duration=0.1,
+        )
+    )
     return Run(
         id=run_id,
-        steps=[
-            Step(
-                id="s1",
-                parent_id=None,
-                kind=StepKind.think,
-                inputs={"text": "plan"},
-                outputs={},
-                model_info="",
-                timestamp=0.0,
-                duration=0.0,
-                cost=0.0,
-            ),
-            Step(
-                id="s2",
-                parent_id="s1",
-                kind=StepKind.done,
-                inputs={},
-                outputs={"answer": "42"},
-                model_info="",
-                timestamp=0.1,
-                duration=0.1,
-                cost=0.0,
-            ),
-        ],
+        graph=graph,
         status=status,
         model_info="m",
-        system_prompt="",
         user_prompt="hi",
-        created_at=0.0,
-        metadata={},
     )
 
 
@@ -130,7 +117,7 @@ def test_select_run_updates_detail_state(tmp_path: Path) -> None:
 def test_pause_rejects_unsafe_run_id(tmp_path: Path) -> None:
     gui = _gui(tmp_path)
     evil = _make_run("abc", RunStatus.running)
-    evil.id = "../evil"  # type: ignore[misc]
+    evil.run_id = "../evil"  # Run.id is a read-only property over run_id
     gui._selected_run = evil
     with patch.object(Run, "pause") as pause_mock:
         gui._pause_selected()

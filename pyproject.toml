@@ -6,7 +6,7 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
-    "opentine>=0.1.0",
+    "opentine>=0.1.1",
     "dearpygui>=2.0",
 ]
 

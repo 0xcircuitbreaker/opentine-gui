@@ -394,13 +394,6 @@ class OpentineGUI:
             dpg.configure_item("err_header", show=False)
             dpg.set_value("err_text", "")
 
-    def _on_run_click(self, sender, app_data) -> None:
-        row_idx = app_data[0] if app_data else 0
-        visible_runs = self._filtered_runs()
-        if row_idx >= len(visible_runs):
-            return
-        self._select_run(visible_runs[row_idx].id)
-
     def _on_run_selected(self, sender, app_data, user_data) -> None:
         self._select_run(user_data)
 
@@ -493,20 +486,29 @@ class OpentineGUI:
         dpg.set_value("detail_text", "\n".join(lines))
 
     def _show_step_detail(self, step: Step) -> None:
+        parents = ", ".join(step.parent_ids) if step.parent_ids else "(root)"
         lines = [
             f"ID: {step.id}",
             f"Kind: {step.kind.value}",
-            f"Parent: {step.parent_id or '(root)'}",
+            f"Parents: {parents}",
             f"Model: {step.model_info or '(none)'}",
             f"Duration: {step.duration:.3f}s",
             f"Cost: ${step.cost:.6f}",
-            "",
-            "Inputs:",
         ]
+        if step.tool_info:
+            lines.append("")
+            lines.append("Tool:")
+            lines.extend(_mapping_lines(step.tool_info))
+        lines.append("")
+        lines.append("Inputs:")
         lines.extend(_mapping_lines(step.inputs))
         lines.append("")
         lines.append("Outputs:")
         lines.extend(_mapping_lines(step.outputs))
+        if step.error:
+            lines.append("")
+            lines.append("Error:")
+            lines.extend(_mapping_lines(step.error))
         dpg.set_value("step_text", "\n".join(lines))
 
     def _clear_dag(self) -> None:
@@ -562,10 +564,13 @@ class OpentineGUI:
             out_attr[step.id] = out_id
 
         for step in run.steps:
-            if step.parent_id and step.parent_id in out_attr and step.id in in_attr:
-                dpg.add_node_link(
-                    out_attr[step.parent_id], in_attr[step.id], parent="dag_editor"
-                )
+            if step.id not in in_attr:
+                continue
+            for parent_id in step.parent_ids:
+                if parent_id in out_attr:
+                    dpg.add_node_link(
+                        out_attr[parent_id], in_attr[step.id], parent="dag_editor"
+                    )
 
     def _on_step_open(self, sender, app_data, user_data) -> None:
         if not self._selected_run:
@@ -790,17 +795,24 @@ def _node_label(step: Step, *, highlighted: bool = False) -> str:
     kind = step.kind.value
     prefix = "* " if highlighted else ""
     if step.kind == StepKind.tool:
-        name = step.inputs.get("name", "?")
+        name = step.tool_info.get("name") or step.inputs.get("name", "?")
         return f"{prefix}{kind}: {_truncate(name, 34)}"
     if step.kind == StepKind.error:
         text = (
-            step.inputs.get("message")
+            step.error.get("message")
+            or step.error.get("type")
+            or step.inputs.get("message")
             or step.outputs.get("error")
             or step.inputs.get("text")
             or ""
         )
     elif step.kind == StepKind.done:
-        text = step.outputs.get("answer") or step.outputs.get("text") or ""
+        text = (
+            step.outputs.get("answer")
+            or step.outputs.get("text")
+            or step.inputs.get("text")
+            or ""
+        )
     elif step.kind == StepKind.model:
         text = step.outputs.get("text") or step.inputs.get("text") or ""
     else:
@@ -817,11 +829,12 @@ def _step_depths(run: Run) -> dict[str, int]:
     def depth(step: Step, seen: set[str]) -> int:
         if step.id in memo:
             return memo[step.id]
-        if not step.parent_id or step.parent_id not in by_id or step.id in seen:
+        parents = [p for p in step.parent_ids if p in by_id and p != step.id]
+        if not parents or step.id in seen:
             memo[step.id] = 0
             return 0
         seen.add(step.id)
-        memo[step.id] = depth(by_id[step.parent_id], seen) + 1
+        memo[step.id] = 1 + max(depth(by_id[p], seen) for p in parents)
         seen.remove(step.id)
         return memo[step.id]
 
@@ -836,9 +849,11 @@ def _graph_stats(run: Run) -> dict[str, int]:
     links = 0
     roots = 0
     for step in run.steps:
-        if step.parent_id and step.parent_id in step_ids:
-            links += 1
-            child_counts[step.parent_id] = child_counts.get(step.parent_id, 0) + 1
+        parents = [p for p in step.parent_ids if p in step_ids]
+        if parents:
+            for parent_id in parents:
+                links += 1
+                child_counts[parent_id] = child_counts.get(parent_id, 0) + 1
         else:
             roots += 1
     depths = _step_depths(run)
@@ -895,10 +910,12 @@ def _step_matches_filter(step: Step, query: str) -> bool:
     haystack = [
         step.id,
         step.kind.value,
-        step.parent_id or "",
+        " ".join(step.parent_ids),
         step.model_info,
         _format_value(step.inputs, 500),
         _format_value(step.outputs, 500),
+        _format_value(step.tool_info, 500),
+        _format_value(step.error, 500),
     ]
     return query in "\n".join(haystack).lower()
 
@@ -918,10 +935,12 @@ def _run_matches_filter(run: Run, query: str) -> bool:
             [
                 step.id,
                 step.kind.value,
-                step.parent_id or "",
+                " ".join(step.parent_ids),
                 step.model_info,
                 _format_value(step.inputs, 500),
                 _format_value(step.outputs, 500),
+                _format_value(step.tool_info, 500),
+                _format_value(step.error, 500),
             ]
         )
     return query in "\n".join(haystack).lower()

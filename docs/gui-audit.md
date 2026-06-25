@@ -1,3 +1,44 @@
+# Production Readiness Audit - 2026-06-25
+
+Audited the GUI against the **released open-source opentine 0.1.1** (PyPI; `.tine`
+`format_version == 1`), incorporating opentine PR #2 ("Release audit fixes + 0.1.1",
+merged and tested). The app's *runtime accessors* already matched the real
+`Run`/`Step` API, but the **data fixtures and tests were written against an API and
+file format that opentine never shipped**, so the product was broken end-to-end on a
+clean install.
+
+## Findings (all fixed)
+
+1. **Bundled `.tine` fixtures used an obsolete layout** — flat top-level `steps` list,
+   singular `parent_id`, `type` discriminators, no `format_version`/`graph`/integrity.
+   Released `Run.load()` rejected all five (`Unsupported .tine format_version='missing';
+   expected 1`), so the GUI showed zero runs and five load errors out of the box.
+2. **`demo/seed.py` crashed** under real opentine: `Step(parent_id=…)` and `Run(steps=…)`
+   are not valid constructors (`Step.parent_ids: list[str]`; `Run.__init__` rejects
+   unknown kwargs). Rewritten to build `Graph`/`Step`/`Run` correctly and save valid,
+   integrity-checked artifacts. Fixtures regenerated.
+3. **Test suite (18/34 failing)** shared the same invalid constructors, plus mutated the
+   read-only `Run.id` property and appended to the read-only `Run.steps` view. Rewritten;
+   suite is now 36/36 green against opentine 0.1.1.
+4. **Multi-parent graphs under-rendered.** opentine steps carry `parent_ids` (a list);
+   `Step.parent_id` returns only the *last* parent. The DAG, depth, and graph-stats logic
+   used the singular accessor, so merge nodes silently dropped edges. Now every parent is
+   drawn and counted.
+5. **Step content didn't match opentine conventions.** Error messages live in `step.error`,
+   tool names in `step.tool_info`, and `done` text often in `inputs.text`. Node labels, the
+   step inspector, and search now read those fields.
+
+## Verification
+
+- `pytest`: 36 passed. `ruff check`: clean.
+- All five regenerated `.tine_runs/*.tine` fixtures load and pass `Run.verify_integrity`.
+- Full GUI launched on a real display: themes, node editor, tables, run/step selection, and
+  the DAG built and rendered without error.
+- Added `.github/workflows/ci.yml` (ruff + headless pytest + fixture-load proof on 3.11/3.12)
+  and a `CHANGELOG.md`. Dependency pinned to `opentine >= 0.1.1`; `uv.lock` refreshed.
+
+---
+
 # GUI Audit - 2026-04-29
 
 ## Smoke Results

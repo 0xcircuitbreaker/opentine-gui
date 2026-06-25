@@ -1,1 +1,65 @@
-{"type":"Run","id":"demo-fork-child","steps":[{"type":"Step","id":"k1","parent_id":null,"kind":"think","inputs":{"text":"Retry with different strategy."},"outputs":{},"model_info":"","timestamp":0.0,"duration":0.05,"cost":0.0},{"type":"Step","id":"k2","parent_id":"k1","kind":"model","inputs":{"text":"Reason about alternatives"},"outputs":{"text":"Plan B: incremental rollout"},"model_info":"claude-sonnet-4-6","timestamp":0.0,"duration":0.9,"cost":0.005}],"status":"paused","model_info":"claude-sonnet-4-6","system_prompt":"","user_prompt":"Cut release v0.1.0.","created_at":1776364804.8315806,"metadata":{"forked_from":"demo-failed@f4"}}
+{
+  "cache": {},
+  "created_at": 1782416752.423259,
+  "format_version": 1,
+  "graph": {
+    "order": [
+      "k1",
+      "k2"
+    ],
+    "steps": {
+      "k1": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "k1",
+        "inputs": {
+          "text": "Retry with different strategy."
+        },
+        "kind": "think",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "k2": {
+        "cost": 0.005,
+        "duration": 0.9,
+        "error": {},
+        "id": "k2",
+        "inputs": {
+          "text": "Reason about alternatives"
+        },
+        "kind": "model",
+        "model_info": "claude-sonnet-4-6",
+        "outputs": {
+          "text": "Plan B: incremental rollout"
+        },
+        "parent_ids": [
+          "k1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "forked_from": "demo-failed@f4",
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "90e616e765fdc1a69c58491f8c1b5faa6117c5435ade99f8282ae543f47a1c18"
+    },
+    "model_info": "claude-sonnet-4-6",
+    "system_prompt": "",
+    "user_prompt": "Cut release v0.1.1."
+  },
+  "policies": {},
+  "refs": {
+    "main": "k2"
+  },
+  "run_id": "demo-fork-child",
+  "status": "running",
+  "transcript": []
+}

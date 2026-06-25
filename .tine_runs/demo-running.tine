@@ -1,1 +1,133 @@
-{"type":"Run","id":"demo-running","steps":[{"type":"Step","id":"r1","parent_id":null,"kind":"think","inputs":{"text":"Gather two independent data sources."},"outputs":{},"model_info":"","timestamp":0.0,"duration":0.05,"cost":0.0},{"type":"Step","id":"r2a","parent_id":"r1","kind":"tool","inputs":{"name":"fetch_docs","arguments":{"topic":"api"}},"outputs":{"pages":12},"model_info":"","timestamp":0.0,"duration":0.9,"cost":0.0003},{"type":"Step","id":"r2b","parent_id":"r1","kind":"tool","inputs":{"name":"db_query","arguments":{"table":"events"}},"outputs":{"rows":5421},"model_info":"","timestamp":0.0,"duration":0.3,"cost":0.0001},{"type":"Step","id":"r3","parent_id":"r2b","kind":"model","inputs":{"text":"Reduce events into a timeline."},"outputs":{"text":"Generated 3 clusters"},"model_info":"claude-haiku-4-5-20251001","timestamp":0.0,"duration":1.1,"cost":0.008},{"type":"Step","id":"r4","parent_id":"r3","kind":"think","inputs":{"text":"Cross-reference docs with timeline…"},"outputs":{},"model_info":"","timestamp":0.0,"duration":0.05,"cost":0.0}],"status":"running","model_info":"claude-sonnet-4-6","system_prompt":"","user_prompt":"Build a unified timeline from docs + events table.","created_at":1776364744.8315737,"metadata":{}}
+{
+  "cache": {},
+  "created_at": 1782416692.4230676,
+  "format_version": 1,
+  "graph": {
+    "order": [
+      "r1",
+      "r2a",
+      "r2b",
+      "r3",
+      "r4"
+    ],
+    "steps": {
+      "r1": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "r1",
+        "inputs": {
+          "text": "Gather two independent data sources."
+        },
+        "kind": "think",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "r2a": {
+        "cost": 0.0003,
+        "duration": 0.9,
+        "error": {},
+        "id": "r2a",
+        "inputs": {
+          "arguments": {
+            "topic": "api"
+          },
+          "name": "fetch_docs"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "pages": 12
+        },
+        "parent_ids": [
+          "r1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "fetch_docs"
+        }
+      },
+      "r2b": {
+        "cost": 0.0001,
+        "duration": 0.3,
+        "error": {},
+        "id": "r2b",
+        "inputs": {
+          "arguments": {
+            "table": "events"
+          },
+          "name": "db_query"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "rows": 5421
+        },
+        "parent_ids": [
+          "r1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "db_query"
+        }
+      },
+      "r3": {
+        "cost": 0.008,
+        "duration": 1.1,
+        "error": {},
+        "id": "r3",
+        "inputs": {
+          "text": "Merge docs + events into a timeline."
+        },
+        "kind": "model",
+        "model_info": "claude-haiku-4-5-20251001",
+        "outputs": {
+          "text": "Generated 3 clusters"
+        },
+        "parent_ids": [
+          "r2a",
+          "r2b"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "r4": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "r4",
+        "inputs": {
+          "text": "Cross-reference docs with timeline\u2026"
+        },
+        "kind": "think",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [
+          "r3"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "b8d72f579ddb2656c0ab48e1bf83b86bfb3c6a9525745bcde9567b5126afe5a4"
+    },
+    "model_info": "claude-sonnet-4-6",
+    "system_prompt": "",
+    "user_prompt": "Build a unified timeline from docs + events table."
+  },
+  "policies": {},
+  "refs": {
+    "main": "r4"
+  },
+  "run_id": "demo-running",
+  "status": "running",
+  "transcript": []
+}

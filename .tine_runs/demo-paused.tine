@@ -1,1 +1,89 @@
-{"type":"Run","id":"demo-paused","steps":[{"type":"Step","id":"p1","parent_id":null,"kind":"think","inputs":{"text":"Draft the refactor plan."},"outputs":{},"model_info":"","timestamp":0.0,"duration":0.05,"cost":0.0},{"type":"Step","id":"p2","parent_id":"p1","kind":"model","inputs":{"text":"Enumerate modules"},"outputs":{"text":"8 modules identified"},"model_info":"claude-sonnet-4-6","timestamp":0.0,"duration":0.8,"cost":0.006},{"type":"Step","id":"p3","parent_id":"p2","kind":"tool","inputs":{"name":"read_file","arguments":{"path":"core.py"}},"outputs":{"content":"...truncated..."},"model_info":"","timestamp":0.0,"duration":0.05,"cost":0.0}],"status":"paused","model_info":"claude-sonnet-4-6","system_prompt":"","user_prompt":"Refactor the core module for readability.","created_at":1776364264.8315766,"metadata":{}}
+{
+  "cache": {},
+  "created_at": 1782416212.4231298,
+  "format_version": 1,
+  "graph": {
+    "order": [
+      "p1",
+      "p2",
+      "p3"
+    ],
+    "steps": {
+      "p1": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "p1",
+        "inputs": {
+          "text": "Draft the refactor plan."
+        },
+        "kind": "think",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "p2": {
+        "cost": 0.006,
+        "duration": 0.8,
+        "error": {},
+        "id": "p2",
+        "inputs": {
+          "text": "Enumerate modules"
+        },
+        "kind": "model",
+        "model_info": "claude-sonnet-4-6",
+        "outputs": {
+          "text": "8 modules identified"
+        },
+        "parent_ids": [
+          "p1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "p3": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "p3",
+        "inputs": {
+          "arguments": {
+            "path": "core.py"
+          },
+          "name": "read_file"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "content": "...truncated..."
+        },
+        "parent_ids": [
+          "p2"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "read_file"
+        }
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "0fc4b7764d636bcf2978a0bb5fca069111c9ebd92178fa2a03ab5925b93ee557"
+    },
+    "model_info": "claude-sonnet-4-6",
+    "system_prompt": "",
+    "user_prompt": "Refactor the core module for readability."
+  },
+  "policies": {},
+  "refs": {
+    "main": "p3"
+  },
+  "run_id": "demo-paused",
+  "status": "paused",
+  "transcript": []
+}

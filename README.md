@@ -25,14 +25,23 @@ tine-gui path/to/runs   # point at a different runs directory
 ## Features
 
 - Run list with status colors (running / paused / completed / failed)
-- Step DAG rendered as a real node editor (parent → child links, per-kind colors, minimap)
-- Run detail + selected-step detail (inputs, outputs, cost, duration, model)
-- Graph summaries and DAG search feedback for wiki-style trace navigation
+- Step DAG rendered as a real node editor (full multi-parent ancestry, per-kind colors, minimap)
+- Run detail + selected-step detail (inputs, outputs, tool info, error payloads, cost, duration, model)
+- Graph summaries and DAG search over ids, kinds, tool names, payloads, and error text
 - Live auto-refresh — picks up new `.tine` files while agents run
 - Run actions: Pause / Resume / Fork-from-step (writes back to the runs dir)
 - File menu: Refresh, Change runs dir, Quit
 - Corrupt `.tine` files surfaced as load errors, not silently dropped
 - Lightweight local preferences for the last runs directory and run search filter
+
+Reads the current open-source [opentine](https://pypi.org/project/opentine/) `.tine` format
+(`format_version == 1`, opentine ≥ 0.1.1) — the same content-addressed, integrity-checked
+artifacts agents and CLI harnesses produce. Try it with bundled demo runs:
+
+```bash
+uv run python demo/seed.py   # writes valid .tine fixtures into ./.tine_runs
+uv run tine-gui
+```
 
 ## Layout
 

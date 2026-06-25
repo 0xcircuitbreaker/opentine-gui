@@ -1,1 +1,161 @@
-{"type":"Run","id":"demo-failed","steps":[{"type":"Step","id":"f1","parent_id":null,"kind":"think","inputs":{"text":"Deploy the release pipeline."},"outputs":{},"model_info":"","timestamp":0.0,"duration":0.05,"cost":0.0},{"type":"Step","id":"f2","parent_id":"f1","kind":"tool","inputs":{"name":"run_ci","arguments":{"branch":"main"}},"outputs":{"exit":0},"model_info":"","timestamp":0.0,"duration":2.4,"cost":0.0},{"type":"Step","id":"f3","parent_id":"f2","kind":"tool","inputs":{"name":"publish","arguments":{"target":"pypi"}},"outputs":{"exit":0},"model_info":"","timestamp":0.0,"duration":1.1,"cost":0.0},{"type":"Step","id":"f4","parent_id":"f3","kind":"model","inputs":{"text":"Write release notes"},"outputs":{"text":"Release notes drafted"},"model_info":"claude-sonnet-4-6","timestamp":0.0,"duration":0.6,"cost":0.004},{"type":"Step","id":"f5","parent_id":"f4","kind":"tool","inputs":{"name":"create_tag","arguments":{"name":"v0.1.0"}},"outputs":{"error":"tag already exists"},"model_info":"","timestamp":0.0,"duration":0.1,"cost":0.0},{"type":"Step","id":"f6","parent_id":"f5","kind":"error","inputs":{"message":"git tag v0.1.0 already exists; aborting"},"outputs":{},"model_info":"","timestamp":0.0,"duration":0.05,"cost":0.0}],"status":"failed","model_info":"claude-opus-4-7","system_prompt":"","user_prompt":"Cut release v0.1.0.","created_at":1776357664.8315797,"metadata":{}}
+{
+  "cache": {},
+  "created_at": 1782409612.4232025,
+  "format_version": 1,
+  "graph": {
+    "order": [
+      "f1",
+      "f2",
+      "f3",
+      "f4",
+      "f5",
+      "f6"
+    ],
+    "steps": {
+      "f1": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "f1",
+        "inputs": {
+          "text": "Deploy the release pipeline."
+        },
+        "kind": "think",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "f2": {
+        "cost": 0.0,
+        "duration": 2.4,
+        "error": {},
+        "id": "f2",
+        "inputs": {
+          "arguments": {
+            "branch": "main"
+          },
+          "name": "run_ci"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "result": "exit 0"
+        },
+        "parent_ids": [
+          "f1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "run_ci"
+        }
+      },
+      "f3": {
+        "cost": 0.0,
+        "duration": 1.1,
+        "error": {},
+        "id": "f3",
+        "inputs": {
+          "arguments": {
+            "target": "pypi"
+          },
+          "name": "publish"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "result": "exit 0"
+        },
+        "parent_ids": [
+          "f2"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "publish"
+        }
+      },
+      "f4": {
+        "cost": 0.004,
+        "duration": 0.6,
+        "error": {},
+        "id": "f4",
+        "inputs": {
+          "text": "Write release notes"
+        },
+        "kind": "model",
+        "model_info": "claude-sonnet-4-6",
+        "outputs": {
+          "text": "Release notes drafted"
+        },
+        "parent_ids": [
+          "f3"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "f5": {
+        "cost": 0.0,
+        "duration": 0.1,
+        "error": {
+          "message": "tag already exists",
+          "type": "GitError"
+        },
+        "id": "f5",
+        "inputs": {
+          "arguments": {
+            "name": "v0.1.1"
+          },
+          "name": "create_tag"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "result": "failed"
+        },
+        "parent_ids": [
+          "f4"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "create_tag"
+        }
+      },
+      "f6": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {
+          "message": "git tag v0.1.1 already exists; aborting",
+          "type": "ReleaseAborted"
+        },
+        "id": "f6",
+        "inputs": {},
+        "kind": "error",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [
+          "f5"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "5d419b5380280ba15cd396eb21b4a0e25e42e4943fe5600822a5a9e7681078d4"
+    },
+    "model_info": "claude-opus-4-8",
+    "system_prompt": "",
+    "user_prompt": "Cut release v0.1.1."
+  },
+  "policies": {},
+  "refs": {
+    "main": "f6"
+  },
+  "run_id": "demo-failed",
+  "status": "failed",
+  "transcript": []
+}

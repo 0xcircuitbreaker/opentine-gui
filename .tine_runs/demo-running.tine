@@ -1,7 +1,7 @@
 {
   "cache": {},
-  "created_at": 1782416692.4230676,
-  "format_version": 1,
+  "created_at": 1785478402.232209,
+  "format_version": 2,
   "graph": {
     "order": [
       "r1",
@@ -92,7 +92,13 @@
           "r2b"
         ],
         "timestamp": 0.0,
-        "tool_info": {}
+        "tool_info": {},
+        "usage": {
+          "cache_read": 2100,
+          "input": 5400,
+          "output": 320,
+          "total": 7820
+        }
       },
       "r4": {
         "cost": 0.0,
@@ -117,7 +123,7 @@
   "metadata": {
     "integrity": {
       "algorithm": "sha256",
-      "digest": "b8d72f579ddb2656c0ab48e1bf83b86bfb3c6a9525745bcde9567b5126afe5a4"
+      "digest": "0cbb20baf56de71454360ddb32851c544d4ea1cf563981a2657445e2ba52bd3e"
     },
     "model_info": "claude-sonnet-4-6",
     "system_prompt": "",

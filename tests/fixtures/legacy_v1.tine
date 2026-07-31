@@ -1,7 +1,7 @@
 {
   "cache": {},
-  "created_at": 1785474922.2320933,
-  "format_version": 2,
+  "created_at": 1782413212.4229674,
+  "format_version": 1,
   "graph": {
     "order": [
       "s1",
@@ -50,9 +50,6 @@
         }
       },
       "s3": {
-        "billing": {
-          "known_subtotal_usd": 0.012
-        },
         "cost": 0.012,
         "duration": 1.7,
         "error": {},
@@ -69,12 +66,7 @@
           "s2"
         ],
         "timestamp": 0.0,
-        "tool_info": {},
-        "usage": {
-          "input": 1200,
-          "output": 180,
-          "total": 1380
-        }
+        "tool_info": {}
       },
       "s4": {
         "cost": 0.0,
@@ -99,7 +91,7 @@
   "metadata": {
     "integrity": {
       "algorithm": "sha256",
-      "digest": "a224ef15cfa488aa2a1489fee9fb46fca48817d1c141e0237ef65476f42eb322"
+      "digest": "7fdcb64cd958004a1b2a432ab7705dbf005214974a4e115b5d62c39187462ea0"
     },
     "model_info": "claude-sonnet-4-6",
     "system_prompt": "You are a research assistant.",

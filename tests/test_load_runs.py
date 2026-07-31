@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -220,6 +221,15 @@ def test_verify_cache_is_effective_for_an_unchanged_file(tmp_path: Path) -> None
     assert len(calls) == 1, "an unchanged file must be verified once, not per refresh"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "The cache key relies on st_ctime, which POSIX bumps on any write and no "
+        "writer can backdate. On Windows st_ctime is creation time, so a same-size, "
+        "mtime-restored rewrite is served from cache until the file changes again — "
+        "the residual limitation documented on _verify_cached."
+    ),
+)
 def test_verify_cache_detects_a_size_and_mtime_preserving_tamper(tmp_path: Path) -> None:
     # An integrity check exists to catch tampering, and os.utime lets a writer put
     # mtime back after a same-length edit. The cache key must not be fooled by that.

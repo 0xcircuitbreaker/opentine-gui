@@ -1,15 +1,13 @@
 {
   "cache": {},
-  "created_at": 1785471322.231936,
+  "created_at": 1785478522.233015,
   "format_version": 2,
   "graph": {
     "order": [
       "f1",
       "f2",
       "f3",
-      "f4",
-      "f5",
-      "f6"
+      "f4"
     ],
     "steps": {
       "f1": {
@@ -93,69 +91,40 @@
         ],
         "timestamp": 0.0,
         "tool_info": {}
-      },
-      "f5": {
-        "cost": 0.0,
-        "duration": 0.1,
-        "error": {
-          "message": "tag already exists",
-          "type": "GitError"
-        },
-        "id": "f5",
-        "inputs": {
-          "arguments": {
-            "name": "v0.1.1"
-          },
-          "name": "create_tag"
-        },
-        "kind": "tool",
-        "model_info": "",
-        "outputs": {
-          "result": "failed"
-        },
-        "parent_ids": [
-          "f4"
-        ],
-        "timestamp": 0.0,
-        "tool_info": {
-          "name": "create_tag"
-        }
-      },
-      "f6": {
-        "cost": 0.0,
-        "duration": 0.05,
-        "error": {
-          "message": "git tag v0.1.1 already exists; aborting",
-          "type": "ReleaseAborted"
-        },
-        "id": "f6",
-        "inputs": {},
-        "kind": "error",
-        "model_info": "",
-        "outputs": {},
-        "parent_ids": [
-          "f5"
-        ],
-        "timestamp": 0.0,
-        "tool_info": {}
       }
     }
   },
   "manifest": {},
   "metadata": {
+    "fork": {
+      "branch": "experiment",
+      "intent": "cb2bb61f380977fc2af2b3fecab9745c346ba8ef8a98bcdee63212ce5d60fb4e",
+      "nonce": "075b296f9ecb660d05607eba732aceec",
+      "point": "f4",
+      "slice": "9ed880fefa21f13335b419f181825d779522d86fb221e3c31172cd0d711d0b8c",
+      "slice_size": 4,
+      "source": "demo-failed",
+      "source_digest": "",
+      "version": 1
+    },
+    "fork_point": "f4",
+    "fork_reason": "retry the release with a slower, more careful model",
+    "forked_from": "demo-failed",
     "integrity": {
       "algorithm": "sha256",
-      "digest": "4bf46268da2b042b19f503335a25be3ad7ac0b62f246229810b00639dad82545"
+      "digest": "6fa3576cfe0b9507a6e90ece36304a0853ddd54fbc545e691af0fdd92c2b6d46"
     },
-    "model_info": "claude-opus-4-8",
+    "model_info": "claude-sonnet-4-6",
     "system_prompt": "",
     "user_prompt": "Cut release v0.1.1."
   },
   "policies": {},
   "refs": {
-    "main": "f6"
+    "experiment": "f4",
+    "fork_point": "f4",
+    "main": "f4"
   },
-  "run_id": "demo-failed",
-  "status": "failed",
+  "run_id": "1629f578e18b04784166db94f0464fdf2677d222dd6e540c627399cfb65f9b22",
+  "status": "running",
   "transcript": []
 }

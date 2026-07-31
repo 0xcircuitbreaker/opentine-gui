@@ -1,7 +1,7 @@
 {
   "cache": {},
-  "created_at": 1782416752.423259,
-  "format_version": 1,
+  "created_at": 1785478462.2323184,
+  "format_version": 2,
   "graph": {
     "order": [
       "k1",
@@ -46,10 +46,11 @@
   },
   "manifest": {},
   "metadata": {
-    "forked_from": "demo-failed@f4",
+    "fork_point": "f4",
+    "forked_from": "demo-failed",
     "integrity": {
       "algorithm": "sha256",
-      "digest": "90e616e765fdc1a69c58491f8c1b5faa6117c5435ade99f8282ae543f47a1c18"
+      "digest": "b6e167de8cc55c3a0915d76d6f43e1ac3762e7ce5778270bf364f5506d80635f"
     },
     "model_info": "claude-sonnet-4-6",
     "system_prompt": "",

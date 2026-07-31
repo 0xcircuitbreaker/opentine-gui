@@ -1,8 +1,10 @@
 """Seed ./.tine_runs with demo runs covering every status, kind, and DAG shape.
 
-Runs are built with the real opentine API and written as valid
-``format_version == 1`` ``.tine`` artifacts (integrity digest included), so the
-GUI loads them exactly like runs produced by live agents.
+Runs are built with the real opentine API and written in the current portable
+``.tine`` format of the installed opentine (``format_version == 2`` as of
+opentine 0.3.0, integrity digest included), so the GUI loads them exactly like
+runs produced by live agents. Legacy v1 files are auto-migrated by Run.load;
+a committed v1 sample lives in tests/fixtures/legacy_v1.tine.
 
 Run: `uv run python demo/seed.py`
 """
@@ -29,6 +31,8 @@ def _step(
     tool_info: dict | None = None,
     error: dict | None = None,
     ts: float = 0.0,
+    usage: dict | None = None,
+    billing: dict | None = None,
 ) -> Step:
     return Step(
         id=sid,
@@ -42,6 +46,8 @@ def _step(
         timestamp=ts,
         duration=duration,
         cost=cost,
+        usage=usage or {},
+        billing=billing or {},
     )
 
 
@@ -66,6 +72,8 @@ def completed_linear() -> Run:
             {"text": "Summarize search results"},
             {"text": "Tine shows 2.3x throughput vs baseline."},
             cost=0.012, duration=1.7, model="claude-sonnet-4-6",
+            usage={"input": 1200, "output": 180, "total": 1380},
+            billing={"known_subtotal_usd": 0.012},
         ),
         _step("s4", ["s3"], StepKind.done, {"text": "Tine is 2.3x faster."}),
     ]
@@ -90,7 +98,8 @@ def running_branched() -> Run:
         _step("r3", ["r2a", "r2b"], StepKind.model,
               {"text": "Merge docs + events into a timeline."},
               {"text": "Generated 3 clusters"},
-              cost=0.008, duration=1.1, model="claude-haiku-4-5-20251001"),
+              cost=0.008, duration=1.1, model="claude-haiku-4-5-20251001",
+              usage={"input": 5400, "output": 320, "cache_read": 2100, "total": 7820}),
         _step("r4", ["r3"], StepKind.think, {"text": "Cross-reference docs with timeline…"}),
     ]
     return _run(
@@ -151,7 +160,13 @@ def failed_deep() -> Run:
     )
 
 
-def forked_run() -> Run:
+def legacy_forked_run() -> Run:
+    """A fork in the pre-0.4.0 shape: lineage keys only, no fork record.
+
+    Still produced today whenever a caller passes an explicit ``new_run_id``,
+    and the shape of every artifact written before 0.4.0, so the console has to
+    keep rendering it.
+    """
     steps = [
         _step("k1", [], StepKind.think, {"text": "Retry with different strategy."}),
         _step("k2", ["k1"], StepKind.model,
@@ -165,22 +180,37 @@ def forked_run() -> Run:
         model_info="claude-sonnet-4-6",
         user_prompt="Cut release v0.1.1.",
         created_at=time.time() - 60,
-        metadata={"forked_from": "demo-failed@f4"},
+        metadata={"forked_from": "demo-failed", "fork_point": "f4"},
     )
 
 
-def main() -> None:
-    runs_dir = Path(".tine_runs")
+def real_fork(source: Run) -> Run:
+    """A genuine opentine 0.4.0 fork: derived id, recorded basis, verifiable.
+
+    Its id is a content hash rather than a friendly name, which is exactly the
+    point: the id commits to the fork act, so sibling forks of one step no
+    longer collide.
+    """
+    reason = "retry the release with a slower, more careful model"
+    forked = source.fork("f4", branch="experiment", intent={"reason": reason})
+    forked.metadata["fork_reason"] = reason
+    return forked
+
+
+def main(runs_dir: Path | str = Path(".tine_runs")) -> None:
+    runs_dir = Path(runs_dir)
     if runs_dir.exists():
         shutil.rmtree(runs_dir)
-    runs_dir.mkdir()
+    runs_dir.mkdir(parents=True)
 
+    failed = failed_deep()
     for run in [
         completed_linear(),
         running_branched(),
         paused_midflight(),
-        failed_deep(),
-        forked_run(),
+        failed,
+        legacy_forked_run(),
+        real_fork(failed),
     ]:
         path = runs_dir / f"{run.id}.tine"
         run.save(path)

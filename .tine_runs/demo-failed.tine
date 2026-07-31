@@ -1,7 +1,7 @@
 {
   "cache": {},
-  "created_at": 1782409612.4232025,
-  "format_version": 1,
+  "created_at": 1785471322.231936,
+  "format_version": 2,
   "graph": {
     "order": [
       "f1",
@@ -145,7 +145,7 @@
   "metadata": {
     "integrity": {
       "algorithm": "sha256",
-      "digest": "5d419b5380280ba15cd396eb21b4a0e25e42e4943fe5600822a5a9e7681078d4"
+      "digest": "4bf46268da2b042b19f503335a25be3ad7ac0b62f246229810b00639dad82545"
     },
     "model_info": "claude-opus-4-8",
     "system_prompt": "",

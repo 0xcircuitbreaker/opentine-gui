@@ -1,0 +1,107 @@
+{
+  "cache": {},
+  "created_at": 1782413212.4229674,
+  "format_version": 1,
+  "graph": {
+    "order": [
+      "s1",
+      "s2",
+      "s3",
+      "s4"
+    ],
+    "steps": {
+      "s1": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "s1",
+        "inputs": {
+          "text": "Plan the search strategy for Tine benchmarks."
+        },
+        "kind": "think",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "s2": {
+        "cost": 0.0008,
+        "duration": 0.42,
+        "error": {},
+        "id": "s2",
+        "inputs": {
+          "arguments": {
+            "q": "tine benchmark 2026"
+          },
+          "name": "web_search"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "result": "3 results"
+        },
+        "parent_ids": [
+          "s1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "web_search"
+        }
+      },
+      "s3": {
+        "cost": 0.012,
+        "duration": 1.7,
+        "error": {},
+        "id": "s3",
+        "inputs": {
+          "text": "Summarize search results"
+        },
+        "kind": "model",
+        "model_info": "claude-sonnet-4-6",
+        "outputs": {
+          "text": "Tine shows 2.3x throughput vs baseline."
+        },
+        "parent_ids": [
+          "s2"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "s4": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "s4",
+        "inputs": {
+          "text": "Tine is 2.3x faster."
+        },
+        "kind": "done",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [
+          "s3"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "7fdcb64cd958004a1b2a432ab7705dbf005214974a4e115b5d62c39187462ea0"
+    },
+    "model_info": "claude-sonnet-4-6",
+    "system_prompt": "You are a research assistant.",
+    "user_prompt": "How does Tine compare to the baseline benchmark?"
+  },
+  "policies": {},
+  "refs": {
+    "main": "s4"
+  },
+  "run_id": "demo-complete",
+  "status": "completed",
+  "transcript": []
+}

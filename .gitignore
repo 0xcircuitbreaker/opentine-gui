@@ -9,3 +9,7 @@ build/
 .claude/
 .tmp_gui_qa_runs/
 .tmp_tolaria_reference/
+
+# demo/seed.py writes this deliberately-invalid file to exercise the
+# load-error panel; it is generated, not source.
+.tine_runs/zz-corrupt.tine

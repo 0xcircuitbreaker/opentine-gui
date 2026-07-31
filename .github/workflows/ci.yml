@@ -7,10 +7,14 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # The GUI ships for Windows, macOS and Linux, so the suite runs on all three.
+    # Every test is headless: no test creates a Dear PyGui context or viewport.
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -20,16 +24,28 @@ jobs:
       - name: Sync (with dev extras)
         run: uv sync --extra dev
       - name: Lint
-        run: uvx ruff check opentine_gui tests demo
+        if: matrix.os == 'ubuntu-latest'
+        run: uvx ruff check opentine_gui tests demo scripts
       - name: Test (headless — no Dear PyGui viewport)
         run: uv run pytest -q
-      - name: Verify bundled .tine fixtures load under released opentine
+      - name: Verify bundled .tine fixtures load under the pinned opentine
+        # Path-agnostic and shell-agnostic: `python -` heredocs are bash-only,
+        # and Windows runners default to PowerShell.
+        run: uv run python scripts/verify_fixtures.py
+
+  build:
+    name: Build and check the distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Check package metadata
+        run: uvx twine check dist/*
+      - name: Install the built wheel into a clean environment
         run: |
-          uv run python - <<'PY'
-          from pathlib import Path
-          from opentine.core import Run
-          for f in sorted(Path(".tine_runs").glob("*.tine")):
-              Run.load(f)
-              assert Run.verify_integrity(f).ok, f
-              print("ok", f.name)
-          PY
+          uv venv /tmp/wheel-check
+          uv pip install --python /tmp/wheel-check/bin/python dist/*.whl
+          /tmp/wheel-check/bin/python -c "import opentine_gui; print(opentine_gui.__version__)"

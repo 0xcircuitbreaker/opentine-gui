@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -49,3 +49,16 @@ jobs:
           uv venv /tmp/wheel-check
           uv pip install --python /tmp/wheel-check/bin/python dist/*.whl
           /tmp/wheel-check/bin/python -c "import opentine_gui; print(opentine_gui.__version__)"
+          /tmp/wheel-check/bin/tine-gui --version
+
+      - name: Metadata is readable without graphics libraries
+        # tine-gui is a desktop app, but --version/--help and __version__ must work
+        # on a slim or headless image. Dear PyGui links libX11, so importing it
+        # eagerly would break all three; this container has no X11 at all.
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" python:3.13-slim sh -c '
+            pip install --quiet /dist/*.whl &&
+            python -c "import opentine_gui; print(opentine_gui.__version__)" &&
+            tine-gui --version &&
+            tine-gui --help > /dev/null
+          '

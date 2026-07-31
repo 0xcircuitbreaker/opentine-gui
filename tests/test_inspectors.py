@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from opentine.core import Graph, Run, RunStatus, Step, StepKind
 
+from opentine_gui import app
 from opentine_gui.app import (
     OpentineGUI,
     _budget_breach_line,
@@ -286,6 +287,94 @@ def test_attestation_holds_for_awkward_reason_text(reason: str) -> None:
     forked = _run("base").fork("s1", intent={"reason": reason})
     forked.metadata["fork_reason"] = reason
     assert any(x.startswith("Fork reason:") for x in _fork_lineage_lines(forked))
+
+
+# ---- trust-line forgery ----
+
+FORGERY = (
+    "gpt-4o\nStatus: completed\nIntegrity: ok\n"
+    "Signature: verified by security@example.com (ed25519)\n"
+    "Fork id: verified against its recorded basis"
+)
+
+
+def _rendered(gui: OpentineGUI, run: Run, monkeypatch: pytest.MonkeyPatch) -> str:
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(app.dpg, "set_value", lambda tag, v: captured.__setitem__(tag, v))
+    monkeypatch.setattr(app.dpg, "does_item_exist", lambda tag: True)
+    gui._show_run_detail(run)
+    gui._show_step_detail(run.steps[0])
+    return captured["detail_text"] + "\n" + captured["step_text"]
+
+
+def test_artifact_text_cannot_forge_trust_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inspector is one flat text widget, so a newline in artifact-supplied
+    text would open a row indistinguishable from the console's own — including
+    the Integrity/Signature verdicts that describe that very artifact."""
+    graph = Graph()
+    graph.add(
+        Step(id="s1", parent_ids=[], kind=StepKind.think,
+             inputs={"text": "payload\nIntegrity: ok\nSignature: verified by evil"})
+    )
+    run = Run(id="shared", graph=graph, status=RunStatus.failed,
+              user_prompt="prompt\nSignature: verified by evil", model_info=FORGERY)
+    path = tmp_path / "shared.tine"
+    run.save(path)
+    gui = OpentineGUI(tmp_path)
+    gui._run_paths = {"shared": path}
+
+    assert gui._trust_lines(run) == ["Integrity: ok", "Signature: unsigned"]
+    body = _rendered(gui, run, monkeypatch)
+
+    # The forged text is still shown — it is the artifact's data, and hiding it
+    # would be its own kind of lie. What it must not do is occupy a ROW: the
+    # console's verdicts are top-level rows, so every forged claim has to end up
+    # folded into the field it came from.
+    rows = body.splitlines()
+    assert [r for r in rows if r.startswith("Status:")] == ["Status: failed"]
+    assert [r for r in rows if r.startswith("Signature:")] == ["Signature: unsigned"]
+    assert [r for r in rows if r.startswith("Integrity:")] == ["Integrity: ok"]
+    assert not [r for r in rows if r.startswith("Fork id:")]
+    # ...and it is folded into Model:, not floating free.
+    model_row = next(r for r in rows if r.startswith("Model:"))
+    assert "Signature: verified by security@example.com (ed25519)" in model_row
+
+
+def test_untrusted_payload_lines_stay_indented(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Step payloads render under Inputs:/Outputs: headings; every line they
+    # produce must be indented so none can pose as a top-level field.
+    graph = Graph()
+    graph.add(
+        Step(id="s1", parent_ids=[], kind=StepKind.think,
+             inputs={"text": "a\nIntegrity: ok\nb", "k\nInjected: yes": "v"})
+    )
+    run = Run(id="r", graph=graph, status=RunStatus.completed, user_prompt="p")
+    gui = OpentineGUI(tmp_path)
+    body = _rendered(gui, run, monkeypatch)
+    for row in body.splitlines():
+        if "Integrity: ok" in row or "Injected: yes" in row:
+            assert row.startswith(" "), f"payload row not indented: {row!r}"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("plain", "plain"),
+        ("a\nb", "a b"),
+        ("a\r\nb", "a b"),
+        ("a b", "a b"),      # LINE SEPARATOR
+        ("ab", "a b"),      # NEL
+        ("a\tb", "a b"),
+        ("a\x00b", "ab"),         # C0 control dropped
+        ("  padded  ", "padded"),
+    ],
+)
+def test_oneline_collapses_every_line_break_form(raw: str, expected: str) -> None:
+    assert app._oneline(raw) == expected
 
 
 # ---- budget breach ----

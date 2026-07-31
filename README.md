@@ -116,7 +116,7 @@ uv run pytest
 uvx ruff check opentine_gui tests
 ```
 
-Manual GUI QA coverage lives in [docs/gui-qa.md](docs/gui-qa.md).
+Manual GUI QA coverage lives in [docs/gui-qa.md](https://github.com/0xcircuitbreaker/opentine-gui/blob/main/docs/gui-qa.md).
 
 ## License
 

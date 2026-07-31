@@ -942,7 +942,7 @@ class OpentineGUI:
 
     def _set_status(self, msg: str) -> None:
         if dpg.does_item_exist("status_bar"):
-            dpg.set_value("status_bar", _sanitize(msg))
+            dpg.set_value("status_bar", _oneline(msg))
 
     def _auto_refresh_tick(self) -> None:
         now = time.monotonic()
@@ -1043,7 +1043,7 @@ class OpentineGUI:
             # Files that did not load at all come first: a warning about a run
             # the user can still open must not push a missing run out of view.
             ordered = fatal + warnings
-            shown = [_truncate(e, 160) for e in ordered[:10]]
+            shown = [_oneline(_truncate(e, 160)) for e in ordered[:10]]
             if len(ordered) > len(shown):
                 shown.append(f"...and {len(ordered) - len(shown)} more")
             dpg.set_value("err_text", _sanitize("\n".join(shown)))
@@ -1144,7 +1144,7 @@ class OpentineGUI:
         run_id = str(run.id)
         lines = [
             f"Run: {run_id}" if len(run_id) <= 32 else f"Run: {run_id[:12]}...",
-            f"Model: {run.model_info or '(none)'}",
+            f"Model: {_oneline(run.model_info) or '(none)'}",
             f"Status: {run.status.value}",
             f"Created: {_format_timestamp(run.created_at)}",
             _format_version_line(run),
@@ -1170,16 +1170,20 @@ class OpentineGUI:
         if breach:
             lines.append(breach)
         if run.tags:
-            lines.append(f"Tags: {', '.join(str(t) for t in sorted(run.tags))}")
+            lines.append(f"Tags: {', '.join(_oneline(t) for t in sorted(run.tags))}")
         if run.refs:
-            refs = ", ".join(f"{name} -> {tip}" for name, tip in run.refs.items())
+            refs = ", ".join(
+                f"{_oneline(name)} -> {_oneline(tip)}" for name, tip in run.refs.items()
+            )
             lines.append(f"Refs: {refs}")
         lines.extend(self._trust_lines(run))
         if len(run_id) > 32:
             lines.append(f"Full id: {run_id}")
-        lines.extend(["", "Prompt:", f"  {_truncate(run.user_prompt or '', 700)}"])
+        lines.extend(["", "Prompt:", *_indent_block(_truncate(run.user_prompt or "", 700))])
         if run.system_prompt:
-            lines.extend(["", "System prompt:", f"  {_truncate(run.system_prompt, 400)}"])
+            lines.extend(
+                ["", "System prompt:", *_indent_block(_truncate(run.system_prompt, 400))]
+            )
         lineage = _fork_lineage_lines(run)
         if lineage:
             lines.append("")
@@ -1211,12 +1215,12 @@ class OpentineGUI:
         return lines
 
     def _show_step_detail(self, step: Step) -> None:
-        parents = ", ".join(str(p) for p in step.parent_ids) if step.parent_ids else "(root)"
+        parents = ", ".join(_oneline(p) for p in step.parent_ids) if step.parent_ids else "(root)"
         lines = [
-            f"ID: {step.id}",
+            f"ID: {_oneline(step.id)}",
             f"Kind: {step.kind.value}",
             f"Parents: {parents}",
-            f"Model: {step.model_info or '(none)'}",
+            f"Model: {_oneline(step.model_info) or '(none)'}",
             f"Duration: {step.duration:.3f}s",
             f"Cost: ${step.cost:.6f}",
         ]
@@ -1289,12 +1293,19 @@ class OpentineGUI:
         max_depth = max(rows_at_depth, default=0)
         pitch_x, pitch_y = _px(NODE_PITCH_X), _px(NODE_PITCH_Y)
         cols = max(1, self._dag_avail_width() // pitch_x)
+        # Bucket depths by band once. Rescanning every depth for every band is
+        # quadratic, and a legal run can hold ~15,900 steps within MAX_TINE_BYTES
+        # — enough to freeze the render thread for over ten seconds.
+        depths_by_band: dict[int, list[int]] = {}
+        for d in rows_at_depth:
+            depths_by_band.setdefault(d // cols, []).append(d)
         band_y: dict[int, int] = {}
         y_cursor = _px(20)
         for band in range(max_depth // cols + 1):
             band_y[band] = y_cursor
-            depths_in_band = [d for d in rows_at_depth if d // cols == band]
-            band_rows = max((rows_at_depth[d] for d in depths_in_band), default=1)
+            band_rows = max(
+                (rows_at_depth[d] for d in depths_by_band.get(band, ())), default=1
+            )
             y_cursor += band_rows * pitch_y + _px(30)
         col_fill: dict[int, int] = {}
         for step in run.steps:
@@ -2076,11 +2087,12 @@ def _mapping_lines(data: dict, *, limit: int = 700) -> list[str]:
     lines: list[str] = []
     for key, value in data.items():
         formatted = _format_value(value, limit)
+        key_text = _oneline(key)
         if "\n" in formatted:
-            lines.append(f"  {key}:")
-            lines.extend(f"    {line}" for line in formatted.splitlines())
+            lines.append(f"  {key_text}:")
+            lines.extend(_indent_block(formatted, "    "))
         else:
-            lines.append(f"  {key}: {formatted}")
+            lines.append(f"  {key_text}: {_oneline(formatted)}")
     return lines
 
 
@@ -2221,8 +2233,8 @@ def _fork_lineage_lines(run: Run) -> list[str]:
         return []
     point = metadata.get("fork_point") or (basis.get("point") if basis else "")
     lines = [
-        f"Forked from: {_truncate(origin, 120)}"
-        + (f" at step {_truncate(point, 80)}" if point else "")
+        f"Forked from: {_oneline(_truncate(origin, 120))}"
+        + (f" at step {_oneline(_truncate(point, 80))}" if point else "")
     ]
 
     if isinstance(basis, dict):
@@ -2251,7 +2263,7 @@ def _fork_lineage_lines(run: Run) -> list[str]:
                 lines.append("Fork id: verified against its recorded basis")
     reason = metadata.get("fork_reason")
     if reason:
-        lines.append(f"{_fork_reason_label(basis, reason)}: {_truncate(reason, 200)}")
+        lines.append(f"{_fork_reason_label(basis, reason)}: {_oneline(_truncate(reason, 200))}")
     return lines
 
 
@@ -2380,6 +2392,32 @@ def _sanitize(s: str) -> str:
     if s.isascii():
         return s
     return s.encode("utf-8", "replace").decode("utf-8")
+
+
+#: Line breaks and other C0/C1 controls, which would let artifact text open a new
+#: row in a panel that is rendered as one flat block of text.
+_LINE_BREAKS = re.compile(r"[\r\n\x0b\x0c\x85  ]+")
+_CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f-\x9f]")
+
+
+def _oneline(value: object) -> str:
+    """Collapse untrusted text to a single line.
+
+    The run and step inspectors render as one flat text widget, so a newline in
+    an artifact-supplied field (a model name, a tag, a prompt) would start a new
+    row that is pixel-identical to the console's own — including the
+    Integrity/Signature/Fork-id lines that state whether the artifact is
+    trustworthy. Every interpolated artifact value goes through here so those
+    verdicts cannot be forged by the file they describe.
+    """
+    text = _LINE_BREAKS.sub(" ", _sanitize(str(value)))
+    return _CONTROLS.sub("", text.replace("\t", " ")).strip()
+
+
+def _indent_block(text: str, prefix: str = "  ") -> list[str]:
+    """Render possibly multi-line text with every line indented under a heading."""
+    cleaned = _CONTROLS.sub("", _sanitize(str(text)).replace("\t", " "))
+    return [f"{prefix}{line}" for line in _LINE_BREAKS.split(cleaned)] or [f"{prefix}"]
 
 
 def _elide_middle(text: str, n: int) -> str:

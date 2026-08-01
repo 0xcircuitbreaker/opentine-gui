@@ -24,6 +24,10 @@ Use a disposable runs directory with:
 - [x] Corrupt or oversized `.tine` files appear in the load-error panel.
 - [x] Search filters by run id, status, model, prompt, system prompt, tags, run
   metadata, step id, step kind, and step input/output payload.
+- [x] Search also accepts opentine's field grammar (`status:`, `model:`, `tag:`,
+  `cost:`, `after:`, `before:`), combining fields as AND and matching opentine's
+  own `match_entry` semantics. Plain text remains a substring search; a malformed
+  field query reports why and falls back rather than matching nothing silently.
 - [x] Selecting a run updates the detail panel and rebuilds the DAG.
 - [x] Run details show model, status, created time, format + migration provenance,
   step count, step-kind summary, graph summary, total cost, cost attribution by

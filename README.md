@@ -1,6 +1,14 @@
 # opentine-gui
 
-Desktop GUI for [opentine](https://github.com/0xcircuitbreaker/opentine) — visual management console built with Dear PyGui.
+Desktop GUI for [opentine](https://github.com/0xcircuitbreaker/opentine) — browse, inspect,
+compare and fork agent runs, built with Dear PyGui.
+
+![The opentine run console: run list, run and step inspectors, and the step DAG](https://raw.githubusercontent.com/0xcircuitbreaker/opentine-gui/main/docs/assets/console.png)
+
+Agent runs are recorded by [opentine](https://github.com/0xcircuitbreaker/opentine) as
+content-addressed, integrity-checked `.tine` artifacts. This is the desktop console for
+reading them: what the agent did, what each step cost, where a run branched, and whether
+the artifact in front of you is what it claims to be.
 
 ## Install
 
@@ -118,7 +126,12 @@ uv run pytest
 uvx ruff check opentine_gui tests
 ```
 
-Manual GUI QA coverage lives in [docs/gui-qa.md](https://github.com/0xcircuitbreaker/opentine-gui/blob/main/docs/gui-qa.md).
+Why the console is built the way it is — the Dear PyGui constraints, the trust
+model for artifacts it did not create, and what it deliberately does not do — is in
+[docs/design-notes.md](https://github.com/0xcircuitbreaker/opentine-gui/blob/main/docs/design-notes.md).
+The feature contract it is checked against is in
+[docs/gui-qa.md](https://github.com/0xcircuitbreaker/opentine-gui/blob/main/docs/gui-qa.md).
+Security policy and threat model: [SECURITY.md](https://github.com/0xcircuitbreaker/opentine-gui/blob/main/SECURITY.md).
 
 ## License
 

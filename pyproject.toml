@@ -5,6 +5,12 @@ description = "Desktop GUI for opentine — browse, inspect, compare and fork ag
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+authors = [
+    { name = "CircuitBreaker", email = "44181392+0xcircuitbreaker@users.noreply.github.com" },
+]
+maintainers = [
+    { name = "CircuitBreaker", email = "44181392+0xcircuitbreaker@users.noreply.github.com" },
+]
 requires-python = ">=3.11"
 keywords = ["opentine", "agent", "llm", "observability", "tracing", "gui", "dearpygui"]
 classifiers = [

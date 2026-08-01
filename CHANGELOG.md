@@ -2,6 +2,17 @@
 
 All notable changes to opentine-gui are documented here.
 
+## [Unreleased]
+
+### Added
+- **Export a run as OpenTelemetry GenAI** (`Run > Export as OpenTelemetry JSON`), writing an
+  OTLP/JSON document beside the run. Uses opentine 0.5.0's `to_otel_genai_document`, so the
+  action appears only when the installed opentine provides it; the declared floor stays 0.4.0.
+  The export is read-only and cannot disturb an artifact's integrity digest or signature.
+- Releases publish to PyPI through GitHub Actions using **Trusted Publishing** (OIDC), so no
+  API token is stored in the repository. A tag whose version disagrees with `pyproject.toml`
+  fails the build rather than publishing the wrong version.
+
 ## [0.2.0] - 2026-07-31
 
 Targets **opentine 0.4.0**. This release re-targets the console across three opentine

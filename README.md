@@ -17,7 +17,7 @@ uv run tine-gui
 ```
 
 Requires Python 3.11+ and [`opentine`](https://github.com/0xcircuitbreaker/opentine) 0.4.0
-or newer, which `pip` installs for you.
+or newer (tested against 0.5.0), which `pip` installs for you.
 
 Runs on **Windows, macOS and Linux** — lint and the whole test suite run on all
 three in CI.
@@ -83,7 +83,7 @@ Noto Sans Mono CJK.
 - Lightweight local preferences for the last runs directory and run search filter
 
 Reads the current open-source [opentine](https://pypi.org/project/opentine/) `.tine` format
-(`format_version == 2`, opentine ≥ 0.4.0) — the same content-addressed, integrity-checked
+(`format_version == 2`, opentine ≥ 0.4.0, tested against 0.5.0) — the same content-addressed, integrity-checked
 artifacts agents and CLI harnesses produce. Legacy `format_version == 1` files are
 auto-migrated on load (pause/resume re-save the file as v2; fork writes its new
 artifact as v2 and leaves the source untouched). Try it with bundled

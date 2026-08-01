@@ -7,8 +7,13 @@ name: Release
 #   PyPI Project Name: opentine-gui
 #   Owner:             0xcircuitbreaker
 #   Repository name:   opentine-gui
-#   Workflow name:     release.yml
+#   Workflow name:     publish.yml
 #   Environment name:  pypi
+#
+# opentine-gui is not on PyPI yet, so this must be added as a *pending*
+# publisher (the "Add a new pending publisher" form), not from a project page.
+# Trusted Publishing is per project: the publisher on opentine-tui does not
+# authorise uploads for opentine-gui.
 on:
   push:
     tags: ["v*"]

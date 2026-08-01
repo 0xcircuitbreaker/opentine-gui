@@ -26,7 +26,8 @@ classifiers = [
 dependencies = [
     # 0.4.0 makes a fork id identify the fork act, so forking the same step twice
     # yields distinct runs. Below that, the GUI's fork action silently overwrites
-    # the previous fork of the same point.
+    # the previous fork of the same point. That is the real floor; 0.5.0 is
+    # additive over it and is what this release is tested against.
     "opentine>=0.4.0",
     "dearpygui>=2.0,<3",
 ]

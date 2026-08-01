@@ -8,8 +8,10 @@ Targets **opentine 0.4.0**. This release re-targets the console across three ope
 releases, adds first-class Windows and macOS support, and fixes several ways the console
 could mislead you about a run — or lose one.
 
-**Requires `opentine >= 0.4.0`.** Below that version, forking the same step twice derives
-a single id, and the second fork silently overwrites the first.
+**Requires `opentine >= 0.4.0`**, and is tested against 0.5.0. Below 0.4.0, forking the
+same step twice derives a single id and the second fork silently overwrites the first.
+opentine 0.5.0 is additive — it changes nothing about what is written — so the console
+reads 0.4.0 and 0.5.0 artifacts identically.
 
 ### Added
 

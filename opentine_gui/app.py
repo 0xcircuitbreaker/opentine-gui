@@ -28,6 +28,13 @@ try:
 except Exception:  # pragma: no cover - depends on the installed opentine
     verify_fork_id = None
 
+try:
+    # opentine 0.5.0. The declared floor is 0.4.0, so the export action is
+    # offered only when the installed opentine actually provides it.
+    from opentine import to_otel_genai_document
+except Exception:  # pragma: no cover - depends on the installed opentine
+    to_otel_genai_document = None
+
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]{0,127}$")
 MAX_TINE_BYTES = 10 * 1024 * 1024  # skip .tine files larger than 10 MiB
 
@@ -666,6 +673,12 @@ class OpentineGUI:
                     )
                     dpg.add_separator()
                     dpg.add_menu_item(
+                        label="Export as OpenTelemetry JSON",
+                        callback=self._export_otel,
+                        tag="menu_export_otel",
+                    )
+                    dpg.add_separator()
+                    dpg.add_menu_item(
                         label="Compare with...",
                         callback=self._open_diff_dialog,
                         tag="menu_diff",
@@ -1125,6 +1138,7 @@ class OpentineGUI:
             ("menu_fork_branch", can_fork),
             ("btn_fork", can_fork),
             ("btn_fork_wrap", can_fork),
+            ("menu_export_otel", run is not None and to_otel_genai_document is not None),
             ("menu_diff", can_diff),
             ("btn_diff", can_diff),
             ("btn_diff_wrap", can_diff),
@@ -1643,6 +1657,30 @@ class OpentineGUI:
         self._refresh()
         where = f" on {branch}" if branch and branch != "main" else ""
         self._set_status(f"Forked {run.id}@{step.id}{where} -> {new_run.id}")
+
+    def _export_otel(self) -> None:
+        """Write the selected run as an OTLP/JSON GenAI document.
+
+        Read-only: it never touches the artifact, so it cannot disturb an
+        integrity digest or a signature.
+        """
+        run = self._selected_run
+        if run is None:
+            self._set_status("Select a run to export")
+            return
+        if to_otel_genai_document is None:
+            self._set_status("OpenTelemetry export needs opentine 0.5.0 or newer")
+            return
+        try:
+            document = to_otel_genai_document(run)
+            out_path = _export_path(self._runs_dir, run.id)
+            self._runs_dir.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+        except Exception as e:
+            self._set_status(f"Cannot export: {e}")
+            return
+        spans = _span_count(document)
+        self._set_status(f"Exported {spans} span(s) to {out_path.name}")
 
     def _open_fork_dialog(self) -> None:
         run, step = self._selected_run, self._selected_step
@@ -2212,6 +2250,28 @@ def _pricing_line(run: Run) -> str:
             "(cost is a lower bound)"
         )
     return "Pricing: incomplete (cost is a lower bound)"
+
+
+def _export_path(runs_dir: Path, run_id: str) -> Path:
+    """Where an exported run lands: <runs_dir>/<id>.otel.json, id-safe.
+
+    Reuses the run-id validation the write actions use, so an artifact cannot
+    steer the export outside the runs directory.
+    """
+    safe = _safe_run_path(runs_dir, run_id)
+    return safe.with_suffix(".otel.json")
+
+
+def _span_count(document: object) -> int:
+    """Spans in an OTLP document, tolerating any shape it might take."""
+    try:
+        return sum(
+            len(scope.get("spans", []))
+            for resource in document.get("resourceSpans", [])  # type: ignore[union-attr]
+            for scope in resource.get("scopeSpans", [])
+        )
+    except Exception:
+        return 0
 
 
 def _fork_lineage_lines(run: Run) -> list[str]:

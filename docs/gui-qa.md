@@ -39,6 +39,9 @@ Use a disposable runs directory with:
   title bar) and reports match counts by id, kind, model, tool name, and
   input/output payload in the graph summary/status area.
 - [x] Selecting a step shows formatted inputs and outputs.
+- [x] `Run > Export as OpenTelemetry JSON` writes a valid OTLP document beside the
+  run, leaves the artifact byte-identical, is id-safe, and degrades with a clear
+  message on an opentine older than 0.5.0.
 - [x] Pause is enabled only for running runs and writes the paused status to disk.
 - [x] Resume is enabled only for paused runs and writes the running status to disk.
 - [x] Fork is enabled only after a run and step are selected and writes a new run.
@@ -97,7 +100,7 @@ Use a disposable runs directory with:
 
 ## QA Run — 2026-07-31 (opentine 0.4.0 re-target)
 
-- Passed: `.venv/bin/python -m pytest` (`169 passed`) against local opentine 0.4.0.
+- Passed: `.venv/bin/python -m pytest` (`184 passed`) against opentine 0.5.0 from PyPI.
 - Passed: `uvx ruff check opentine_gui tests demo scripts`.
 - Verified the CI layout locally by reproducing a runner checkout
   (`opentine-gui/` beside `opentine/`): `uv sync --extra dev`, the full suite

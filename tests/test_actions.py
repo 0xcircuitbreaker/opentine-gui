@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from opentine.core import Graph, Run, RunStatus, Step, StepKind
 
 from opentine_gui import app
@@ -233,7 +234,7 @@ def test_sibling_forks_of_one_step_do_not_overwrite(tmp_path: Path) -> None:
 #: Every bound method the app registers as a Dear PyGui callback.
 CALLBACK_NAMES = [
     "_apply_dir", "_clear_step_filter", "_compare_runs", "_confirm_fork",
-    "_copy_run_id", "_copy_step_id", "_fork_selected", "_on_ctrl_c", "_on_ctrl_f",
+    "_copy_run_id", "_copy_step_id", "_export_otel", "_fork_selected", "_on_ctrl_c", "_on_ctrl_f",
     "_on_ctrl_r", "_on_escape", "_on_filter_change", "_on_link_created",
     "_on_link_deleted", "_on_run_selected", "_on_step_filter_change", "_on_step_open",
     "_on_viewport_resize", "_open_diff_dialog", "_open_dir_picker", "_open_fork_dialog",
@@ -263,6 +264,67 @@ def test_callback_inventory_matches_the_source(tmp_path: Path) -> None:
     registered |= set(re.findall(r"self\.(_move_selection)\(", source))
     missing = registered - set(CALLBACK_NAMES) - {"_move_selection"}
     assert not missing, f"new callbacks not covered by the arity test: {sorted(missing)}"
+
+
+def test_otel_export_writes_a_valid_document_and_never_touches_the_artifact(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    source = tmp_path / "abc.tine"
+    _make_run("abc", RunStatus.completed).save(source)
+    before = source.read_bytes()
+    messages: list[str] = []
+    gui = OpentineGUI(tmp_path)
+    gui._set_status = messages.append  # type: ignore[assignment]
+    gui._selected_run = Run.load(source)
+
+    gui._export_otel()
+
+    out = tmp_path / "abc.otel.json"
+    assert out.exists(), messages
+    document = json.loads(out.read_text(encoding="utf-8"))
+    assert "resourceSpans" in document
+    assert app._span_count(document) == 2  # one span per step
+    assert "span(s)" in messages[-1]
+    # Export is read-only: the artifact and its digest are untouched.
+    assert source.read_bytes() == before
+    assert Run.verify_integrity(source).ok
+
+
+def test_otel_export_requires_a_selected_run(tmp_path: Path) -> None:
+    messages: list[str] = []
+    gui = OpentineGUI(tmp_path)
+    gui._set_status = messages.append  # type: ignore[assignment]
+    gui._export_otel()
+    assert "Select a run" in messages[-1]
+    assert not list(tmp_path.glob("*.otel.json"))
+
+
+def test_otel_export_degrades_on_an_older_opentine(tmp_path: Path) -> None:
+    # The declared floor is 0.4.0; the exporter arrived in 0.5.0.
+    _make_run("abc").save(tmp_path / "abc.tine")
+    messages: list[str] = []
+    gui = OpentineGUI(tmp_path)
+    gui._set_status = messages.append  # type: ignore[assignment]
+    gui._selected_run = Run.load(tmp_path / "abc.tine")
+    with patch("opentine_gui.app.to_otel_genai_document", None):
+        gui._export_otel()
+    assert "0.5.0" in messages[-1]
+    assert not list(tmp_path.glob("*.otel.json"))
+
+
+def test_otel_export_path_is_id_safe(tmp_path: Path) -> None:
+    # An artifact must not steer the export out of the runs directory.
+    assert app._export_path(tmp_path, "abc").name == "abc.otel.json"
+    for hostile in ("../escape", "sub/dir", "", "has space"):
+        with pytest.raises(ValueError):
+            app._export_path(tmp_path, hostile)
+
+
+def test_span_count_tolerates_any_document_shape() -> None:
+    for doc in ("a string", None, {}, {"resourceSpans": "x"}, {"resourceSpans": [{}]}, 42):
+        assert isinstance(app._span_count(doc), int)
 
 
 def _keyboard_gui(tmp_path: Path, run_ids: list[str]) -> OpentineGUI:

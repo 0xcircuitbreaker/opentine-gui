@@ -73,6 +73,8 @@ Noto Sans Mono CJK.
   before/after deltas including cost, model and token usage
 - DAG search with visual highlight over ids, kinds, tool names, payloads, and error text
 - Live auto-refresh — picks up new `.tine` files while agents run
+- **Export a run as OpenTelemetry GenAI** (OTLP/JSON) to ship a verified trace to whatever
+  observability backend runs beside it — needs opentine 0.5.0+, and never touches the artifact
 - Run actions: Pause / Resume / Fork-from-step / Fork-to-branch / Compare (writes back to the file each run was
   loaded from; pause and resume reload disk state first so a stale GUI snapshot cannot
   truncate or clobber what an agent wrote since — a small write race remains without

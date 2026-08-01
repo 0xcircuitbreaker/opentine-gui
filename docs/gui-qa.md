@@ -98,45 +98,12 @@ Use a disposable runs directory with:
 - [x] CI runs lint + the full suite on ubuntu, windows and macos runners, and
   verifies the bundled fixtures with a shell-agnostic script.
 
-## QA Run — 2026-07-31 (opentine 0.4.0 re-target)
+## Verification
 
-- Passed: `.venv/bin/python -m pytest` (`184 passed`) against opentine 0.5.0 from PyPI.
-- Passed: `uvx ruff check opentine_gui tests demo scripts`.
-- Verified the CI layout locally by reproducing a runner checkout
-  (`opentine-gui/` beside `opentine/`): `uv sync --extra dev`, the full suite
-  and the fixture verifier all pass from that tree.
-- Passed: `python scripts/verify_fixtures.py` (5 v2 fixtures + the v1 migration
-  fixture).
-- Scripted GUI drive re-run with 25 scenarios (adds sibling forks, the fork
-  dialog, Unicode content and the compare dialog) at 1440x860, 1000x700 and
-  1920x1080.
-
-## QA Run — 2026-07-29 (opentine 0.3.0 re-target)
-
-- Passed: `.venv/bin/python -m pytest` (`47 passed`) against local opentine 0.3.0
-  (editable install; `.tine` portable format v2, v1 auto-migrated on load).
-- Passed: `uvx ruff check opentine_gui tests demo`.
-- Regenerated `.tine_runs/` fixtures as format v2 with `Run.verify_integrity` ok;
-  kept a v1 sample at `tests/fixtures/legacy_v1.tine` for migration coverage.
-- Scripted GUI drive on a real display (16 scenarios: selection, filters,
-  highlight, pause/resume/fork write-backs, dir modal, load errors, empty dir,
-  1000x700 / 1440x860 / 1920x1080 viewports) with framebuffer screenshots
-  reviewed for spacing/overlap/affordance issues.
-
-## QA Run — 2026-06-25
-
-- `uv run pytest` and `uvx ruff check opentine_gui tests` could not run in this
-  cloud image because `uv`/`uvx` were not installed.
-- Installed `python3.12-venv`, created `.venv`, then installed the project with
-  `.[dev]` and latest `ruff`.
-- Passed: `.venv/bin/python -m pytest` (`34 passed`).
-- Passed: `.venv/bin/python -m ruff check opentine_gui tests`.
-- Passed demo data smoke:
-  `.venv/bin/python -c "... demo.seed.main(); load_runs(Path('.tine_runs')) ..."`
-  verified 5 valid demo runs, 1 corrupt-file load error, and 6 signature entries.
-- GUI launch smoke:
-  `timeout 5s xvfb-run -a .venv/bin/tine-gui .tine_runs` opened under a virtual
-  display and was terminated by the timeout as expected for a long-running GUI.
+Every checklist item above is covered by the automated suite, by the scripted
+GUI drive described in `docs/design-notes.md`, or both. CI runs lint and the
+full suite on Windows, macOS and Linux across Python 3.11-3.14, and verifies
+the bundled fixtures load and pass their integrity digests.
 
 ## Remaining Product Gaps
 

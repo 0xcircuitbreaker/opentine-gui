@@ -680,6 +680,12 @@ class OpentineGUI:
                     )
                     dpg.add_separator()
                     dpg.add_menu_item(
+                        label="Transcript...",
+                        callback=self._open_transcript,
+                        tag="menu_transcript",
+                    )
+                    dpg.add_separator()
+                    dpg.add_menu_item(
                         label="Export as OpenTelemetry JSON",
                         callback=self._export_otel,
                         tag="menu_export_otel",
@@ -716,6 +722,7 @@ class OpentineGUI:
 
         self._build_diff_dialog()
         self._build_fork_dialog()
+        self._build_transcript_dialog()
         self._build_key_bindings()
 
         dpg.set_primary_window("primary", True)
@@ -1149,6 +1156,7 @@ class OpentineGUI:
             ("menu_fork_branch", can_fork),
             ("btn_fork", can_fork),
             ("btn_fork_wrap", can_fork),
+            ("menu_transcript", run is not None),
             ("menu_export_otel", run is not None and to_otel_genai_document is not None),
             ("menu_diff", can_diff),
             ("btn_diff", can_diff),
@@ -1718,6 +1726,75 @@ class OpentineGUI:
             reason=dpg.get_value("fork_reason") or "",
             reproducible=bool(dpg.get_value("fork_reproducible")),
         )
+
+    def _build_transcript_dialog(self) -> None:
+        with dpg.window(
+            label="Transcript", modal=True, show=False, tag="transcript_dialog",
+            width=_px(820), height=_px(620),
+        ):
+            dpg.add_text("", tag="transcript_subject", color=TEXT_SECONDARY)
+            dpg.add_text("", tag="transcript_summary", color=TEXT_MUTED, wrap=_px(780))
+            dpg.add_separator()
+            dpg.add_child_window(tag="transcript_body", border=False)
+            dpg.add_separator()
+            dpg.add_button(
+                label="Close", width=_px(110),
+                callback=lambda: dpg.configure_item("transcript_dialog", show=False),
+            )
+
+    def _open_transcript(self) -> None:
+        run = self._selected_run
+        if run is None:
+            self._set_status("Select a run to read its transcript")
+            return
+        for child in dpg.get_item_children("transcript_body", slot=1) or []:
+            dpg.delete_item(child)
+        dpg.set_value("transcript_subject", _sanitize(f"Transcript of {run.id}"))
+        dpg.set_value("transcript_summary", _transcript_summary(run))
+
+        for index, turn in enumerate(_transcript_turns(run)):
+            with dpg.group(horizontal=True, parent="transcript_body"):
+                dpg.add_text(
+                    _transcript_heading(turn),
+                    color=TRANSCRIPT_ROLE_COLORS.get(turn["role"], TEXT_SECONDARY),
+                )
+                if turn["step_id"]:
+                    # The turn knows which step it produced; jumping there is the
+                    # reason to read a transcript beside a graph rather than alone.
+                    dpg.add_button(
+                        label="show step",
+                        width=_px(84),
+                        user_data=turn["step_id"],
+                        callback=self._on_transcript_step,
+                        tag=f"transcript_step_{index}",
+                    )
+            dpg.add_text(
+                _truncate(turn["content"], 4000) or "(empty)",
+                parent="transcript_body",
+                wrap=_px(760),
+                color=TEXT_SECONDARY,
+            )
+            dpg.add_spacer(height=_px(6), parent="transcript_body")
+
+        vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
+        dpg.configure_item(
+            "transcript_dialog", show=True,
+            pos=[max(0, (vw - _px(820)) // 2), max(0, (vh - _px(620)) // 2)],
+        )
+
+    def _on_transcript_step(self, sender, app_data, user_data) -> None:
+        run = self._selected_run
+        if run is None:
+            return
+        step = run.get_step(user_data)
+        if step is None:
+            self._set_status(f"Step {user_data} is not in this run")
+            return
+        self._selected_step = step
+        self._show_step_detail(step)
+        self._update_action_state()
+        dpg.configure_item("transcript_dialog", show=False)
+        self._set_status(f"Selected step {user_data} from the transcript")
 
     def _build_fork_dialog(self) -> None:
         with dpg.window(
@@ -2340,6 +2417,66 @@ def _pricing_line(run: Run) -> str:
             "(cost is a lower bound)"
         )
     return "Pricing: incomplete (cost is a lower bound)"
+
+
+#: Roles the runtime records, in the colour the DAG already uses for that kind
+#: of work, so the transcript and the graph read as one system.
+TRANSCRIPT_ROLE_COLORS = {
+    "user": TEXT_PRIMARY,
+    "assistant": ACCENT_TEAL,
+    "tool": BRAND,
+    "system": ACCENT_PURPLE,
+}
+
+
+def _transcript_turns(run: Run) -> list[dict[str, str]]:
+    """Normalise Run.transcript into turns the console can render.
+
+    opentine's runtime writes {"role", "content"} plus a "step_id" on the turns
+    that produced a step, and "name" on tool results. Everything here is
+    artifact-controlled, so each field is coerced and the whole thing fails open.
+    """
+    try:
+        raw = run.transcript or []
+    except Exception:
+        return []
+    turns: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        content = entry.get("content")
+        if not isinstance(content, str):
+            content = _format_value(content, 4000) if content is not None else ""
+        turns.append(
+            {
+                "role": _oneline(entry.get("role") or "?"),
+                "name": _oneline(entry.get("name") or ""),
+                "step_id": _oneline(entry.get("step_id") or ""),
+                "content": content,
+            }
+        )
+    return turns
+
+
+def _transcript_heading(turn: dict[str, str]) -> str:
+    """The one-line header above a turn's content."""
+    role = turn["role"] or "?"
+    label = f"{role}: {turn['name']}" if turn["name"] else role
+    return f"{label}  [{_truncate(turn['step_id'], 12)}]" if turn["step_id"] else label
+
+
+def _transcript_summary(run: Run) -> str:
+    turns = _transcript_turns(run)
+    if not turns:
+        return (
+            "This run has no transcript. opentine records one when an agent runs; "
+            "artifacts assembled from a graph do not carry it."
+        )
+    roles: dict[str, int] = {}
+    for turn in turns:
+        roles[turn["role"]] = roles.get(turn["role"], 0) + 1
+    linked = sum(1 for t in turns if t["step_id"])
+    return f"{len(turns)} turn(s) - {_format_counts(roles)} - {linked} linked to a step"
 
 
 def _export_path(runs_dir: Path, run_id: str) -> Path:

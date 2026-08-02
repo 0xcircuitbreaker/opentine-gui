@@ -236,6 +236,7 @@ CALLBACK_NAMES = [
     "_apply_dir", "_clear_step_filter", "_compare_runs", "_confirm_fork",
     "_copy_run_id", "_copy_step_id", "_export_otel", "_fork_selected", "_on_ctrl_c", "_on_ctrl_f",
     "_on_ctrl_r", "_on_escape", "_on_filter_change", "_on_link_created",
+    "_on_transcript_step", "_open_transcript",
     "_on_link_deleted", "_on_run_selected", "_on_step_filter_change", "_on_step_open",
     "_on_viewport_resize", "_open_diff_dialog", "_open_dir_picker", "_open_fork_dialog",
     "_pause_selected", "_refresh", "_resume_selected",

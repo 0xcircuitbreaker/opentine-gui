@@ -58,6 +58,12 @@ def _run(run_id: str, steps: list[Step], **fields) -> Run:
     return Run(id=run_id, graph=graph, **fields)
 
 
+def _transcript(*turns: dict) -> list[dict]:
+    """The shape opentine's runtime records: role/content, plus step_id on the
+    turns that produced a step and name on tool results."""
+    return list(turns)
+
+
 def completed_linear() -> Run:
     steps = [
         _step("s1", [], StepKind.think, {"text": "Plan the search strategy for Tine benchmarks."}),
@@ -79,6 +85,19 @@ def completed_linear() -> Run:
     ]
     return _run(
         "demo-complete", steps,
+        # A live agent run carries the conversation that produced the graph.
+        transcript=_transcript(
+            {"role": "user",
+             "content": "How does Tine compare to the baseline benchmark?"},
+            {"step_id": "s1", "role": "assistant",
+             "content": "I'll search for published benchmark numbers first."},
+            {"step_id": "s2", "role": "tool", "name": "web_search",
+             "content": "3 results: throughput comparison, latency study, cost analysis"},
+            {"step_id": "s3", "role": "assistant",
+             "content": "Tine shows 2.3x throughput vs baseline."},
+            {"step_id": "s4", "role": "assistant",
+             "content": "Tine is 2.3x faster."},
+        ),
         status=RunStatus.completed,
         model_info="claude-sonnet-4-6",
         system_prompt="You are a research assistant.",

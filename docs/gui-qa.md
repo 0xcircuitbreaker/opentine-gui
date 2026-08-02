@@ -43,6 +43,9 @@ Use a disposable runs directory with:
   title bar) and reports match counts by id, kind, model, tool name, and
   input/output payload in the graph summary/status area.
 - [x] Selecting a step shows formatted inputs and outputs.
+- [x] `Run > Transcript...` lists every turn in order with its role, tool name and
+  step link; `show step` selects that step and closes the dialog. A run with no
+  transcript explains why rather than showing an empty panel.
 - [x] `Run > Export as OpenTelemetry JSON` writes a valid OTLP document beside the
   run, leaves the artifact byte-identical, is id-safe, and degrades with a clear
   message on an opentine older than 0.5.0.

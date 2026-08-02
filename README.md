@@ -77,6 +77,8 @@ Noto Sans Mono CJK.
   signature status, prompt + system prompt, and fork lineage — origin, fork point, branch,
   and whether the fork act was unique or reproducible
 - Step detail: inputs, outputs, tool info, error payloads, usage, billing, timestamp, cost
+- **Transcript** (`Run > Transcript...`) — the conversation that produced the graph, with
+  each turn linked to the step it created
 - Compare any two runs — common ancestor, steps only on each side, and per-field
   before/after deltas including cost, model and token usage
 - Run search accepts opentine's own query grammar — `status:failed`, `model:opus`,

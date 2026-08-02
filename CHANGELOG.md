@@ -5,6 +5,11 @@ All notable changes to opentine-gui are documented here.
 ## [Unreleased]
 
 ### Added
+- **A transcript view** (`Run > Transcript...`) renders `Run.transcript`: the conversation
+  opentine's runtime records alongside the graph, coloured by role and with every turn that
+  produced a step linked to it, so you can jump from a model reply to the step it created.
+  Artifacts assembled from a graph carry no transcript, and the view says so rather than
+  showing an empty panel. `demo/seed.py` now seeds one.
 - **The run filter understands opentine's query grammar.** `status:failed`,
   `model:opus`, `tag:bug`, `cost:>0.01`, `cost:0.01..1`, `after:2026-07-01` and
   `before:` combine with free-text terms, matching what `tine ls` and `tine search`

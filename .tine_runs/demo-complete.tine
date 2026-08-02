@@ -1,6 +1,6 @@
 {
   "cache": {},
-  "created_at": 1785474922.2320933,
+  "created_at": 1785636053.5354762,
   "format_version": 2,
   "graph": {
     "order": [
@@ -99,7 +99,7 @@
   "metadata": {
     "integrity": {
       "algorithm": "sha256",
-      "digest": "a224ef15cfa488aa2a1489fee9fb46fca48817d1c141e0237ef65476f42eb322"
+      "digest": "5e62e411e047be5ef09b1c035b15fdffce3df9986e1a18f11b084bdb23b3fc87"
     },
     "model_info": "claude-sonnet-4-6",
     "system_prompt": "You are a research assistant.",
@@ -111,5 +111,31 @@
   },
   "run_id": "demo-complete",
   "status": "completed",
-  "transcript": []
+  "transcript": [
+    {
+      "content": "How does Tine compare to the baseline benchmark?",
+      "role": "user"
+    },
+    {
+      "content": "I'll search for published benchmark numbers first.",
+      "role": "assistant",
+      "step_id": "s1"
+    },
+    {
+      "content": "3 results: throughput comparison, latency study, cost analysis",
+      "name": "web_search",
+      "role": "tool",
+      "step_id": "s2"
+    },
+    {
+      "content": "Tine shows 2.3x throughput vs baseline.",
+      "role": "assistant",
+      "step_id": "s3"
+    },
+    {
+      "content": "Tine is 2.3x faster.",
+      "role": "assistant",
+      "step_id": "s4"
+    }
+  ]
 }

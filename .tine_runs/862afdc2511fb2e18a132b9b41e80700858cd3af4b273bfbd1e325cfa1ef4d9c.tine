@@ -1,6 +1,6 @@
 {
   "cache": {},
-  "created_at": 1785478522.233015,
+  "created_at": 1785639653.5363,
   "format_version": 2,
   "graph": {
     "order": [
@@ -99,7 +99,7 @@
     "fork": {
       "branch": "experiment",
       "intent": "cb2bb61f380977fc2af2b3fecab9745c346ba8ef8a98bcdee63212ce5d60fb4e",
-      "nonce": "075b296f9ecb660d05607eba732aceec",
+      "nonce": "ee8ee978ba15d5ad5d666466fd76a640",
       "point": "f4",
       "slice": "9ed880fefa21f13335b419f181825d779522d86fb221e3c31172cd0d711d0b8c",
       "slice_size": 4,
@@ -112,7 +112,7 @@
     "forked_from": "demo-failed",
     "integrity": {
       "algorithm": "sha256",
-      "digest": "6fa3576cfe0b9507a6e90ece36304a0853ddd54fbc545e691af0fdd92c2b6d46"
+      "digest": "9f32a17544dedcd1b6c2a23b0e1cfc139cab2f52504047fde6d1f2bdb67553e1"
     },
     "model_info": "claude-sonnet-4-6",
     "system_prompt": "",
@@ -124,7 +124,7 @@
     "fork_point": "f4",
     "main": "f4"
   },
-  "run_id": "1629f578e18b04784166db94f0464fdf2677d222dd6e540c627399cfb65f9b22",
+  "run_id": "862afdc2511fb2e18a132b9b41e80700858cd3af4b273bfbd1e325cfa1ef4d9c",
   "status": "running",
   "transcript": []
 }

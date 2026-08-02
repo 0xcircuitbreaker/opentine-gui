@@ -35,6 +35,13 @@ try:
 except Exception:  # pragma: no cover - depends on the installed opentine
     to_otel_genai_document = None
 
+try:
+    # The same grammar `tine ls` and `tine search` accept. Present since 0.3.0;
+    # guarded so an older or reshaped opentine costs the field syntax, not the app.
+    from opentine.core import parse_query
+except Exception:  # pragma: no cover - depends on the installed opentine
+    parse_query = None
+
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]{0,127}$")
 MAX_TINE_BYTES = 10 * 1024 * 1024  # skip .tine files larger than 10 MiB
 
@@ -871,7 +878,7 @@ class OpentineGUI:
         with dpg.child_window(width=_px(340), height=-_px(34), border=True, tag="panel_runs"):
             _panel_header("Runs", "Search, select, and manage traces")
             dpg.add_input_text(
-                hint="Search runs (id, status, model, text)",
+                hint="Search, or status:failed model:opus cost:>0.01 tag:bug",
                 tag="run_filter",
                 default_value=self._run_filter,
                 width=-1,
@@ -1085,7 +1092,11 @@ class OpentineGUI:
         self._render_run_table()
         self._update_action_state()
         shown = len(self._filtered_runs())
-        self._set_status(f"{self._runs_dir} - {shown}/{len(self._runs)} run(s) shown")
+        problem = _query_error(self._run_filter)
+        if problem:
+            self._set_status(f"{problem} - falling back to a plain text search")
+        else:
+            self._set_status(f"{self._runs_dir} - {shown}/{len(self._runs)} run(s) shown")
 
     def _current_matches(self, run: Run) -> set[str]:
         if not self._step_filter:
@@ -2113,9 +2124,88 @@ def _step_matches_filter(step: Step, query: str) -> bool:
     return query in _step_search_text(step)
 
 
+#: Field prefixes opentine's own query grammar understands. The grammar only
+#: engages when one of these is present, so a plain multi-word search keeps
+#: behaving as the substring match users already have.
+QUERY_FIELDS = ("status:", "model:", "tag:", "cost:", "after:", "before:", "text:")
+
+
+def _looks_like_a_query(query: str) -> bool:
+    lowered = query.lower()
+    return any(field in lowered for field in QUERY_FIELDS)
+
+
+def _parsed_query(query: str):
+    """opentine's parsed Query for this text, or None to fall back to substring.
+
+    Returns None when the grammar is unavailable (an older opentine), when the
+    text carries no field prefix, or when it does not parse.
+    """
+    if parse_query is None or not _looks_like_a_query(query):
+        return None
+    try:
+        return parse_query(query)
+    except Exception:  # QueryError, or anything a future grammar raises
+        return None
+
+
+def _query_error(query: str) -> str:
+    """Why a field query did not parse, or "" if it parsed or is plain text.
+
+    Without this a typo like `cost:abc` silently matches nothing, which reads
+    as "no such runs" rather than "that is not a valid filter".
+    """
+    if parse_query is None or not query or not _looks_like_a_query(query):
+        return ""
+    try:
+        parse_query(query)
+    except Exception as e:
+        return str(e)
+    return ""
+
+
+def _matches_parsed_query(run: Run, parsed) -> bool:
+    """Evaluate a parsed Query against a loaded run.
+
+    Mirrors opentine's own match_entry so the console and `tine ls` agree:
+    tags must all be present, model is a case-insensitive substring, status is
+    exact, cost and created_at are bounds, and every free-text term must appear.
+    Evaluating here rather than through RunIndex keeps the console read-only —
+    RunIndex.search writes an index file into the user's runs directory.
+    """
+    try:
+        tags = {str(t).lower() for t in run.tags}
+        if parsed.tags and not all(str(t).lower() in tags for t in parsed.tags):
+            return False
+        if parsed.model and str(parsed.model).lower() not in str(run.model_info or "").lower():
+            return False
+        if parsed.status and run.status.value.lower() != str(parsed.status).lower():
+            return False
+        cost = run.total_cost
+        if parsed.cost_min is not None and cost < parsed.cost_min:
+            return False
+        if parsed.cost_max is not None and cost > parsed.cost_max:
+            return False
+        created = run.created_at or 0.0
+        if parsed.after is not None and created < parsed.after:
+            return False
+        if parsed.before is not None and created > parsed.before:
+            return False
+        if parsed.text:
+            haystack = _run_search_text(run)
+            if not all(str(term).lower() in haystack for term in parsed.text):
+                return False
+    except Exception:
+        return False  # never let a hostile artifact break the run list
+    return True
+
+
 def _run_matches_filter(run: Run, query: str) -> bool:
     if not query:
         return True
+    parsed = _parsed_query(query)
+    if parsed is not None:
+        return _matches_parsed_query(run, parsed)
     return query in _run_search_text(run)
 
 

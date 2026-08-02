@@ -5,6 +5,14 @@ All notable changes to opentine-gui are documented here.
 ## [Unreleased]
 
 ### Added
+- **The run filter understands opentine's query grammar.** `status:failed`,
+  `model:opus`, `tag:bug`, `cost:>0.01`, `cost:0.01..1`, `after:2026-07-01` and
+  `before:` combine with free-text terms, matching what `tine ls` and `tine search`
+  accept. The grammar engages only when a field prefix is present, so a plain
+  multi-word search keeps its existing substring behaviour. A malformed filter says
+  why in the status bar instead of silently matching nothing. Parsed queries are
+  evaluated against loaded runs rather than through `RunIndex`, whose `search()`
+  writes an index file into the user's runs directory.
 - **Export a run as OpenTelemetry GenAI** (`Run > Export as OpenTelemetry JSON`), writing an
   OTLP/JSON document beside the run. Uses opentine 0.5.0's `to_otel_genai_document`, so the
   action appears only when the installed opentine provides it; the declared floor stays 0.4.0.

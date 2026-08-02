@@ -79,6 +79,9 @@ Noto Sans Mono CJK.
 - Step detail: inputs, outputs, tool info, error payloads, usage, billing, timestamp, cost
 - Compare any two runs — common ancestor, steps only on each side, and per-field
   before/after deltas including cost, model and token usage
+- Run search accepts opentine's own query grammar — `status:failed`, `model:opus`,
+  `tag:bug`, `cost:>0.01`, `cost:0.01..1`, `after:2026-07-01` — combined with free text.
+  Plain words stay a substring search, so nothing you already type changes meaning
 - DAG search with visual highlight over ids, kinds, tool names, payloads, and error text
 - Live auto-refresh — picks up new `.tine` files while agents run
 - **Export a run as OpenTelemetry GenAI** (OTLP/JSON) to ship a verified trace to whatever

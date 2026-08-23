@@ -24,12 +24,30 @@ _LINE_BREAKS = re.compile(r"[\r\n\x0b\x0c\x85  ]+")
 #: move a terminal's cursor and confuse a text layout engine.
 _CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f-\x9f]")
 
+#: Characters that change how the text around them is *laid out* without being
+#: visible themselves: the bidirectional overrides and isolates, the invisible
+#: operators, and the zero-width space and no-break space. A right-to-left
+#: override inside a model name can print "Signature: verified" out of
+#: characters that read as something else entirely, which is the same forgery a
+#: newline would commit, one layer down. Zero-width joiners (U+200C/U+200D) and
+#: the directional *marks* (U+200E/U+200F) are deliberately kept: they carry
+#: meaning in real text, and they cannot reorder a run on their own.
+_INVISIBLE = re.compile("[\u200b\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+
 
 def _sanitize(s: str) -> str:
-    """Replace lone surrogates: Dear PyGui's native text renderer segfaults on them."""
+    """Make one string safe to hand to a text widget.
+
+    Lone surrogates go first: Dear PyGui's native text renderer segfaults on
+    them. Then the invisible layout controls, which are the same spoofing
+    problem as a newline in a different alphabet.
+
+    The ASCII fast path matters: this runs over every rendered string, including
+    payload blocks, and almost all of them are ASCII.
+    """
     if s.isascii():
         return s
-    return s.encode("utf-8", "replace").decode("utf-8")
+    return _INVISIBLE.sub("", s.encode("utf-8", "replace").decode("utf-8"))
 
 
 def _oneline(value: object) -> str:

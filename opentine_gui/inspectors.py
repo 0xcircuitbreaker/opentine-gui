@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import weakref
 from pathlib import Path
 
 from opentine.core import Run, Step
@@ -24,7 +26,13 @@ from opentine_gui.graphmodel import (
     step_causal_ids,
     step_provider,
 )
-from opentine_gui.sources import _signature_verdict, _verify_integrity_cached
+from opentine_gui.pricing import _cost_is_attributable, unpriced_reason
+from opentine_gui.sources import (
+    _cache_key,
+    _remember,
+    _signature_verdict,
+    _verify_integrity_cached,
+)
 from opentine_gui.text import (
     _format_compact,
     _format_counts,
@@ -55,6 +63,52 @@ except Exception:  # pragma: no cover - depends on the installed opentine
 # ---------------------------------------------------------------- cost/pricing
 
 
+#: Per-run memo for the three walks the run inspector repeats. `Run.total_cost`
+#: alone was evaluated four times per render and took 41 ms on a 10,000-step
+#: artifact; the inspector, the table, the summary and the budget row each asked
+#: for it again. Keyed weakly on the run and validated on status, the one field
+#: the console mutates in place, exactly like the search-text cache in `query`.
+_RUN_FACTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _facts(run: Run, name: str, compute):
+    """`compute(run)` once per run revision, or straight through if it cannot be cached."""
+    status = getattr(getattr(run, "status", None), "value", "")
+    try:
+        cached = _RUN_FACTS.get(run)
+    except TypeError:  # an unhashable Run subclass
+        return compute(run)
+    if cached is None or cached.get("__status") != status:
+        cached = {"__status": status}
+        try:
+            _RUN_FACTS[run] = cached
+        except TypeError:
+            return compute(run)
+    if name not in cached:
+        cached[name] = compute(run)
+    return cached[name]
+
+
+def _total_cost(run: Run) -> float | None:
+    """The run's own total, or None when it cannot be read as a number.
+
+    `Run.total_cost` sums `billing["known_subtotal_usd"]` as a Decimal, and that
+    value is a string nothing validates: twelve steps claiming `"1e999999"` sum
+    past the billing context's exponent limit and the property raises
+    `decimal.Overflow`. Interpolating it directly took out the whole run table,
+    including every healthy run beside the crafted one.
+    """
+    return _facts(run, "total_cost", _read_total_cost)
+
+
+def _read_total_cost(run: Run) -> float | None:
+    try:
+        value = float(run.total_cost)
+    except Exception:
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _pricing_incompleteness(run: Run) -> tuple[bool, int, int]:
     """(incomplete, unpriced, total) from manifest.pricing; fails open on any shape.
 
@@ -66,8 +120,12 @@ def _pricing_incompleteness(run: Run) -> tuple[bool, int, int]:
         pricing = run.manifest.get("pricing")
     except Exception:
         return (False, 0, 0)
-    if not isinstance(pricing, dict) or pricing.get("complete") is not False:
-        return (False, 0, 0)  # absent, True, or unreadable -> no caveat
+    if not isinstance(pricing, dict) or pricing.get("complete", True) is True:
+        # opentine's own rule: anything that is not literally True — False, 0,
+        # "false", null — is not a proven-complete claim, and it breaches a
+        # strict_cost budget on exactly those values. Reading `is not False`
+        # let an artifact drop the floor marker by writing `null`.
+        return (False, 0, 0)
     raw = pricing.get("invocations")
     if not isinstance(raw, list):
         return (True, 0, 0)  # the flag stands; counts unknown
@@ -77,7 +135,13 @@ def _pricing_incompleteness(run: Run) -> tuple[bool, int, int]:
 
 
 def _recorded_cost_state(run: Run) -> str:
-    """How to read this run's recorded cost: "priced", "partial" or "unrecorded".
+    return _facts(run, "cost_state", _read_cost_state)
+
+
+def _read_cost_state(run: Run) -> str:
+    """How to read this run's recorded cost.
+
+    One of "priced", "partial", "unrecorded" or "unreadable".
 
     A run whose steps carry no billing at all — an imported trace, a run
     captured against an unmetered local model — legitimately sums to zero. That
@@ -89,11 +153,20 @@ def _recorded_cost_state(run: Run) -> str:
             return "partial"
         steps = run.steps
         billable = [s for s in steps if s.kind.value == "model"]
+        total = _total_cost(run)
+        if total is None:
+            # The artifact claims an amount, but not one that can be totalled.
+            # That is a different statement from "nothing was priced".
+            return "unreadable"
         if not billable:
-            return "priced" if run.total_cost else "unrecorded"
-        if run.total_cost:
+            return "priced" if total else "unrecorded"
+        if total:
             return "priced"
-        if any(getattr(s, "billing", None) for s in billable):
+        # Not the truthiness of the billing dict: the honest shape for something
+        # nothing could price is `{"status": "unknown", ...}` beside `cost: 0.0`,
+        # and reading that as "billed and genuinely free" let the artifact pick
+        # which of the console's two answers the reader saw.
+        if any(_cost_is_attributable(s) for s in billable):
             return "priced"  # billed and genuinely free (an unmetered local model)
         return "unrecorded"
     except Exception:
@@ -108,10 +181,12 @@ def _cost_text(run: Run, amount: float | None = None) -> str:
     an imported trace looks like — printing `$0.0000` there states a spend the
     artifact never claimed.
     """
-    value = run.total_cost if amount is None else amount
+    value = _total_cost(run) if amount is None else amount
     state = _recorded_cost_state(run)
     if amount is None and state == "unrecorded":
         return "no cost recorded"
+    if value is None:
+        return "cost unreadable"
     return f"{'>=' if state == 'partial' else ''}${value:.4f}"
 
 
@@ -120,13 +195,22 @@ def _cost_cell(run: Run) -> str:
     state = _recorded_cost_state(run)
     if state == "unrecorded":
         return "-"
-    return f"{'>=' if state == 'partial' else ''}${run.total_cost:.4f}"
+    value = _total_cost(run)
+    if value is None:
+        return "?"
+    return f"{'>=' if state == 'partial' else ''}${value:.4f}"
 
 
 def _pricing_line(run: Run) -> str:
     incomplete, unpriced, total = _pricing_incompleteness(run)
     if not incomplete:
-        if _recorded_cost_state(run) == "unrecorded":
+        state = _recorded_cost_state(run)
+        if state == "unreadable":
+            return (
+                "Pricing: this run records an amount that cannot be totalled "
+                "(it is not a finite number)"
+            )
+        if state == "unrecorded":
             return (
                 "Pricing: nothing priced at capture "
                 "(imported or unmetered - use Run > Price this run)"
@@ -143,7 +227,7 @@ def _pricing_line(run: Run) -> str:
 def _cost_attribution_lines(run: Run, *, limit: int = 4) -> list[str]:
     """Where the money went, when more than one model or kind spent any."""
     try:
-        breakdown = run.cost_breakdown()
+        breakdown = _facts(run, "cost_breakdown", lambda r: r.cost_breakdown())
     except Exception:
         return []
     lines: list[str] = []
@@ -217,8 +301,14 @@ def _format_version_line(run: Run) -> str:
     return f"Format: v{run.format_version}"
 
 
-def _fork_reason_label(basis: object, reason: object) -> str:
+def _fork_reason_label(basis: object, reason: object, *, identity_ok: bool = False) -> str:
     """"Fork reason", or flagged unverified when the text is not attested.
+
+    `identity_ok` is `verify_fork_id`'s verdict. Reproducing the intent digest
+    only proves the reason matches the record beside it; both are written by
+    whoever wrote the file. The unqualified label is granted only when the fork
+    id also derives from that record, which is what ties the pair to the run's
+    own identity rather than to itself.
 
     opentine deliberately leaves `metadata.fork_reason` out of
     `_SIGNED_METADATA_KEYS` (for 0.3.0 signature compatibility) and the whole
@@ -228,7 +318,7 @@ def _fork_reason_label(basis: object, reason: object) -> str:
     canonical intent object — so a reason that reproduces it is bound to the
     fork act, and one that does not must not be shown as if it were.
     """
-    if not isinstance(basis, dict) or not isinstance(reason, str):
+    if not identity_ok or not isinstance(basis, dict) or not isinstance(reason, str):
         return "Fork reason (unverified)"
     recorded = basis.get("intent")
     if not isinstance(recorded, str):
@@ -263,6 +353,12 @@ def _fork_lineage_lines(run: Run) -> list[str]:
         + (f" at step {_oneline(_truncate(point, 80))}" if point else "")
     ]
 
+    identity: bool | None = None
+    if isinstance(basis, dict) and verify_fork_id is not None:
+        try:
+            identity = verify_fork_id(run)
+        except Exception:
+            identity = None
     if isinstance(basis, dict):
         parts = []
         branch = basis.get("branch")
@@ -278,19 +374,42 @@ def _fork_lineage_lines(run: Run) -> list[str]:
             lines.append(f"Fork: {', '.join(parts)}")
         # metadata sits outside the integrity digest, so a post-hoc edit to the
         # fork record still verifies "ok". This is the only check that catches it.
-        if verify_fork_id is not None:
-            try:
-                verdict = verify_fork_id(run)
-            except Exception:
-                verdict = None
-            if verdict is False:
-                lines.append("Fork id: DOES NOT MATCH its recorded basis")
-            elif verdict is True:
-                lines.append("Fork id: verified against its recorded basis")
+        if identity is False:
+            lines.append("Fork id: DOES NOT MATCH its recorded basis")
+        elif identity is True:
+            lines.append("Fork id: verified against its recorded basis")
+        else:
+            # A record whose version this build does not know silences the check
+            # entirely. Saying nothing there reads as nothing to say, which is
+            # the one reading a forged record wants.
+            lines.append("Fork id: not checked (this build cannot read this fork record)")
+        # And the whole block is self-describing: the origin run is named by the
+        # file that claims to be its fork, and never consulted.
+        lines.append(
+            "Fork provenance is the artifact's own account: it can be checked for "
+            "internal consistency, not against the run it names."
+        )
     reason = metadata.get("fork_reason")
     if reason:
-        lines.append(f"{_fork_reason_label(basis, reason)}: {_oneline(_truncate(reason, 200))}")
+        label = _fork_reason_label(basis, reason, identity_ok=identity is True)
+        lines.append(f"{label}: {_oneline(_truncate(reason, 200))}")
     return lines
+
+
+#: The scheme is read out of the artifact's own JSON, which means parsing the
+#: whole file: 104 ms on a 5 MB run, on the render thread, every time the panel
+#: was drawn. It is a property of one file revision like the two verdicts beside
+#: it, so it is cached the same way.
+_SCHEME_CACHE: dict[tuple, str] = {}
+_SCHEME_CACHE_MAX = 512
+
+
+def _scheme_cached(path: Path, stat_result) -> str:
+    key = _cache_key(path, stat_result, "scheme")
+    hit = _SCHEME_CACHE.get(key)
+    if hit is not None:
+        return hit
+    return _remember(_SCHEME_CACHE, key, signature_scheme(path), _SCHEME_CACHE_MAX)
 
 
 def _trust_lines(path: Path | None, *, config=None) -> list[str]:
@@ -303,12 +422,12 @@ def _trust_lines(path: Path | None, *, config=None) -> list[str]:
         return [f"Integrity: unreadable ({e})"]
 
     integrity = _verify_integrity_cached(path, stat_result)
+    scheme = _scheme_cached(path, stat_result)
     # A configured key is bound into a fresh closure per call; the verdict cache
     # is keyed by the configuration's fingerprint, so this costs nothing beyond
     # the first check of each file under that key.
     checker = trust_verifier(config) if getattr(config, "configured", False) else None
     signature = _signature_verdict(path, stat_result, checker, getattr(config, "fingerprint", ""))
-    scheme = signature_scheme(path)
     lines = [integrity_line(integrity), signature_line(signature, scheme=scheme)]
     lines.extend(
         coverage_lines(signature, scheme=scheme, draft=bool(integrity.get("draft")))
@@ -329,8 +448,11 @@ def _run_detail_lines(
     kind_counts: dict[str, int] = {}
     for step in run.steps:
         kind_counts[step.kind.value] = kind_counts.get(step.kind.value, 0) + 1
-    stats = _graph_stats(run)
-    run_id = str(run.id)
+    stats = _facts(run, "graph_stats", _graph_stats)
+    # The id is as artifact-controlled as anything else in the file, and it is
+    # rendered directly above the trust rows: a run id of "a\nIntegrity: ok"
+    # writes that second line itself.
+    run_id = _oneline(run.id)
     graph_line = (
         f"Graph: {stats['roots']} root(s), {stats['links']} link(s), "
         f"{stats['branches']} branch point(s), depth {stats['max_depth']}"
@@ -356,6 +478,11 @@ def _run_detail_lines(
     pricing_line = _pricing_line(run)
     if pricing_line:
         lines.append(pricing_line)
+    shortfall = unpriced_reason(run)
+    if shortfall and not pricing_line:
+        # Only when the manifest did not already say it: two sentences making the
+        # same point read as two separate problems.
+        lines.append(f"Cost caveat: {shortfall}")
     lines.extend(_cost_attribution_lines(run))
     budget_line = _budget_line(run)
     if budget_line:
@@ -425,7 +552,9 @@ def _run_list_summary(runs: list[Run], visible_runs: list[Run], query: str) -> s
     status_counts: dict[str, int] = {}
     for run in visible_runs:
         status_counts[run.status.value] = status_counts.get(run.status.value, 0) + 1
-    total_cost = sum(run.total_cost for run in visible_runs)
+    totals = [_total_cost(run) for run in visible_runs]
+    total_cost = sum(value for value in totals if value is not None)
+    unreadable = sum(1 for value in totals if value is None)
     shown = f"{len(visible_runs)}/{len(runs)} shown" if query else f"{len(runs)} run(s)"
     counts = _format_counts(status_counts)
     partial = sum(1 for run in visible_runs if _pricing_incompleteness(run)[0])
@@ -436,12 +565,14 @@ def _run_list_summary(runs: list[Run], visible_runs: list[Run], query: str) -> s
         notes.append(f"{partial} partially priced")
     if unpriced:
         notes.append(f"{unpriced} with no recorded cost")
+    if unreadable:
+        notes.append(f"{unreadable} with an unreadable cost")
     note = f" ({', '.join(notes)})" if notes else ""
     return f"{shown} - {counts} - visible cost {cost}{note}"
 
 
 def _dag_summary(run: Run, query: str = "", matches: set[str] | None = None) -> str:
-    stats = _graph_stats(run)
+    stats = _facts(run, "graph_stats", _graph_stats)
     summary = (
         f"{len(run.steps)} step(s), {stats['links']} link(s), "
         f"{stats['branches']} branch point(s), depth {stats['max_depth']}"
@@ -599,16 +730,13 @@ def _extra_step_deltas(left: Run, right: Run, *, limit: int = 12) -> list[str]:
     lines: list[str] = []
     for step_id in [sid for sid in left_steps if sid in right_steps]:
         a, b = left_steps[step_id], right_steps[step_id]
+        short = _oneline(step_id)[:12]
         before, after = step_provider(a), step_provider(b)
         if before != after:
-            lines.append(
-                f"  {step_id[:12]}  provider: {before or '(none)'} -> {after or '(none)'}"
-            )
+            lines.append(f"  {short}  provider: {before or '(none)'} -> {after or '(none)'}")
         causal_a, causal_b = step_causal_ids(a), step_causal_ids(b)
         if causal_a != causal_b:
-            lines.append(
-                f"  {step_id[:12]}  causal edges: {len(causal_a)} -> {len(causal_b)}"
-            )
+            lines.append(f"  {short}  causal edges: {len(causal_a)} -> {len(causal_b)}")
         if len(lines) >= limit:
             lines.append("  ...and more")
             break
@@ -619,10 +747,11 @@ def _format_run_diff(left: Run, right: Run, *, max_steps: int = 25, max_fields: 
     """Human-readable semantic diff of two runs, using opentine's own Run.diff."""
     diff = left.diff(right)
     lines = [
-        f"A: {left.id}",
-        f"B: {right.id}",
+        f"A: {_oneline(left.id)}",
+        f"B: {_oneline(right.id)}",
         "",
-        f"Common ancestor: {diff.common_ancestor or '(none - unrelated runs)'}",
+        "Common ancestor: "
+        + (_oneline(diff.common_ancestor) if diff.common_ancestor else "(none - unrelated runs)"),
         f"Cost: {_cost_text(left)} -> {_cost_text(right)}",
         f"Steps: {len(left.steps)} -> {len(right.steps)}",
         "",
@@ -634,7 +763,7 @@ def _format_run_diff(left: Run, right: Run, *, max_steps: int = 25, max_fields: 
             lines.append("  (none)")
             return
         for step in steps[:max_steps]:
-            lines.append(f"  {step.id[:12]}  {_node_label(step)}")
+            lines.append(f"  {_oneline(step.id)[:12]}  {_node_label(step)}")
         if len(steps) > max_steps:
             lines.append(f"  ...and {len(steps) - max_steps} more")
 
@@ -647,8 +776,8 @@ def _format_run_diff(left: Run, right: Run, *, max_steps: int = 25, max_fields: 
     if not diff.changed:
         lines.append("  (none)")
     for change in diff.changed[:max_steps]:
-        a_id = getattr(change.step_a, "id", "?")
-        b_id = getattr(change.step_b, "id", "?")
+        a_id = _oneline(getattr(change.step_a, "id", "?"))
+        b_id = _oneline(getattr(change.step_b, "id", "?"))
         lines.append(f"  {a_id[:12]} -> {b_id[:12]}")
         for delta in change.fields[:max_fields]:
             keys = f" [{', '.join(map(str, delta.changed_keys))}]" if delta.changed_keys else ""

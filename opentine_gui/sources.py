@@ -97,10 +97,16 @@ def _cache_key(path: Path, stat_result, kind: str) -> tuple:
 
     Inode and change time are part of it, not just size and mtime: an integrity
     check exists to catch tampering, and `os.utime` lets a writer restore mtime
-    after a same-length edit. POSIX will not let it backdate st_ctime, so any
-    rewrite still misses the cache. (On Windows st_ctime is creation time, so a
-    same-size, mtime-restored rewrite there can still be served from cache until
-    the file changes again.)
+    after a same-length edit. A filesystem that keeps an independent change time
+    the writer cannot set — ext4, APFS, NTFS — therefore misses the cache on any
+    rewrite.
+
+    That is a property of the filesystem, not of POSIX. On Windows `st_ctime` is
+    creation time, and on FAT/exFAT, CIFS and several FUSE mounts there is no
+    independent change time at all (Linux reports `st_ctime == st_mtime`) — and
+    removable or network media is exactly how an artifact someone sent you
+    arrives. There a same-size, mtime-restored rewrite is served from cache
+    until the file changes again. See SECURITY.md.
     """
     return (
         str(path),
@@ -117,10 +123,11 @@ def _remember(cache: dict, key: tuple, value: Any, limit: int) -> Any:
 
     A full clear at the limit makes a directory holding more revisions than the
     cap re-hash everything on every pass — the worst case is exactly the busy
-    directory the cache exists for.
+    directory the cache exists for. Insertion order is the eviction order, which
+    for these caches is also arrival order.
     """
     if len(cache) >= limit:
-        for stale in list(cache)[: max(1, limit // 4)]:
+        for stale in list(cache.copy())[: max(1, limit // 4)]:
             cache.pop(stale, None)
     cache[key] = value
     return value
@@ -208,9 +215,14 @@ def _load_run_cached(path: Path, stat_result) -> Run:
 
 
 def _forget_run(path: Path) -> None:
-    """Drop every cached revision of one file, after the console wrote to it."""
+    """Drop every cached revision of one file, after the console wrote to it.
+
+    Over a copy: the loader thread inserts into this cache while a write action
+    on the render thread is dropping entries from it, and iterating the live
+    dict raises "changed size during iteration" at exactly that moment.
+    """
     prefix = str(path)
-    for key in [k for k in _RUN_CACHE if k[0] == prefix]:
+    for key in [k for k in _RUN_CACHE.copy() if k[0] == prefix]:
         _RUN_CACHE.pop(key, None)
 
 
@@ -262,7 +274,10 @@ class Snapshot:
     #: v3 only: every ref in the repository, and whether the clone is shallow.
     refs: dict[str, str] = field(default_factory=dict)
     shallow: bool = False
-    writable: bool = True
+    #: False until a scan says otherwise. The placeholder a directory change
+    #: installs is not evidence that the new source can be written to, and the
+    #: actions read this to decide whether they may write at all.
+    writable: bool = False
     note: str = ""
 
     @property

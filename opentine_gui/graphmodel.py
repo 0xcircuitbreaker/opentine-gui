@@ -176,11 +176,17 @@ def _graph_stats(run: Run) -> dict[str, int]:
 
 
 def _node_label(step: Step, *, highlighted: bool = False) -> str:
+    """One line naming what a step did.
+
+    Collapsed to a single line before it is returned: this is a node title in the
+    graph, but the comparison pane renders the same string into a flat text block
+    where a newline would open a row of its own.
+    """
     kind = step.kind.value
     prefix = "* " if highlighted else ""
     if step.kind == StepKind.tool:
         name = (step.tool_info or {}).get("name") or step.inputs.get("name", "?")
-        return f"{prefix}{kind}: {_truncate(name, 16)}"
+        return _oneline(f"{prefix}{kind}: {_truncate(name, 16)}")
     if step.kind == StepKind.error:
         error = step.error or {}
         text = (
@@ -200,8 +206,8 @@ def _node_label(step: Step, *, highlighted: bool = False) -> str:
     else:
         text = step.inputs.get("text") or ""
     if text:
-        return f"{prefix}{kind}: {_truncate(text, 18)}"
-    return f"{prefix}{kind}: {_sanitize(step.short_id)}"
+        return _oneline(f"{prefix}{kind}: {_truncate(text, 18)}")
+    return _oneline(f"{prefix}{kind}: {_sanitize(step.short_id)}")
 
 
 def _node_subtitle(step: Step) -> str:

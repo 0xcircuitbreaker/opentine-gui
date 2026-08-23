@@ -158,6 +158,12 @@ NODE_PITCH_Y = 170
 MAX_DAG_NODES = 400
 #: The run table is rebuilt from scratch on every render, so it is bounded too.
 MAX_TABLE_ROWS = 500
+#: One assembled row of a text panel. Five different metadata fields can each
+#: carry a 9-million-character string out of a file well under MAX_TINE_BYTES,
+#: and bounding them one at a time closes one hole at a time. The panel bounds
+#: the row instead: the prompt blocks are already capped at 700/400, so nothing
+#: legitimate reaches this.
+MAX_PANEL_ROW = 2000
 #: A transcript is artifact-supplied and unbounded: one turn becomes a heading,
 #: a button and a text block, so a 20,000-turn conversation would build ~60,000
 #: widgets in the frame that opens the dialog.
@@ -513,6 +519,15 @@ class OpentineGUI:
         self._filter_dirty_at: float | None = None
         self._preferences_dirty_at: float | None = None
         self._node_ids: dict[str, int | str] = {}
+        #: What the table last drew, and which revision of the selected run the
+        #: graph was built from. Both are compared before doing the work again:
+        #: rebuilding the graph throws away the reader's pan, zoom and node
+        #: positions, and rebuilding the table costs six widgets per row.
+        #: None until the table has been drawn once. An empty directory has an
+        #: empty state, and treating "nothing yet" as "same as last time" left
+        #: the empty-state row undrawn.
+        self._table_fingerprint: tuple | None = None
+        self._graph_fingerprint: tuple = ()
         self._quote: pricing.RunQuote | None = None
         self._quote_key: str | None = None
         #: Label -> entry key for the comparison picker, and the pending action
@@ -1086,11 +1101,15 @@ class OpentineGUI:
             dpg.set_value("step_text", "Select a step in the DAG")
             self._clear_dag()
         elif entry is not None:
-            previous, self._selected_run = self._selected_run, entry.run
+            self._selected_run = entry.run
             self._show_run_detail(entry)
-            if previous is not entry.run:
-                # Rebuilding the graph resets pan, zoom and node positions, so
-                # it happens only when the run's own bytes actually changed.
+            # Keyed on the file revision rather than on object identity: the run
+            # cache hands back the same object for an unchanged file only while
+            # it holds it, so past its cap identity alone rebuilt every graph on
+            # every tick.
+            fingerprint = (entry.key, entry.mtime, entry.size, len(entry.run.steps))
+            if fingerprint != self._graph_fingerprint:
+                self._graph_fingerprint = fingerprint
                 self._rebuild_dag(entry.run, highlight=self._current_matches(entry.run))
             if self._selected_step is not None:
                 step = entry.run.get_step(self._selected_step.id)
@@ -1199,9 +1218,13 @@ class OpentineGUI:
     def _filtered_runs(self) -> list[Run]:
         return [entry.run for entry in self._visible_entries()]
 
-    def _render_run_table(self) -> None:
+    def _render_run_table(self, *, force: bool = False) -> None:
         if not dpg.does_item_exist("run_table"):
             return
+        fingerprint = self._table_state()
+        if not force and fingerprint == self._table_fingerprint:
+            return
+        self._table_fingerprint = fingerprint
         for child in dpg.get_item_children("run_table", slot=1) or []:
             dpg.delete_item(child)
         visible = self._visible_entries()
@@ -1210,7 +1233,7 @@ class OpentineGUI:
             run = entry.run
             selected = entry.key == self._selected_key
             with dpg.table_row(parent="run_table"):
-                label = _elide_middle(str(run.id), 18)
+                label = _elide_middle(_oneline(run.id), 18)
                 dpg.add_selectable(
                     label=label,
                     default_value=selected,
@@ -1255,7 +1278,7 @@ class OpentineGUI:
         """What the row's own columns are too narrow to say."""
         run = entry.run
         parts = [
-            str(run.id),
+            _oneline(run.id),
             f"{run.status.value}  {len(run.steps)} step(s)  {_cost_cell(run)}",
             f"model {_oneline(run.model_info) or '(none)'}",
             f"created {_format_timestamp(getattr(run, 'created_at', 0.0))}",
@@ -1267,6 +1290,25 @@ class OpentineGUI:
         if run.tags:
             parts.append("tags " + ", ".join(_oneline(tag) for tag in sorted(run.tags)))
         return "\n".join(parts)
+
+    def _table_state(self) -> tuple:
+        """Everything the table draws, so an unchanged list is not redrawn."""
+        try:
+            return tuple(
+                (
+                    entry.key,
+                    self._selected_key == entry.key,
+                    entry.run.status.value,
+                    len(entry.run.steps),
+                    _cost_cell(entry.run),
+                    _format_age(entry.mtime or getattr(entry.run, "created_at", 0.0)),
+                )
+                for entry in self._visible_entries()[:MAX_TABLE_ROWS]
+            )
+        except Exception:
+            # Never equal to a real state, so an artifact that raises here costs
+            # a redraw rather than a frozen table.
+            return ("<unreadable>",)
 
     def _on_table_sort(self, sender, sort_specs) -> None:
         """Dear PyGui hands back [[column_id, direction], ...], or None."""
@@ -1326,6 +1368,7 @@ class OpentineGUI:
         self._quote = None
         self._show_run_detail(entry)
         dpg.set_value("step_text", "Select a step in the DAG")
+        self._graph_fingerprint = (entry.key, entry.mtime, entry.size, len(entry.run.steps))
         self._rebuild_dag(entry.run, highlight=self._current_matches(entry.run))
         self._render_run_table()
         self._update_action_state()
@@ -1375,6 +1418,11 @@ class OpentineGUI:
 
     # -------------------------------------------------------------- rendering
 
+    @staticmethod
+    def _panel_text(lines: list[str]) -> str:
+        """Rows, bounded and made safe, as one string for a flat text widget."""
+        return _sanitize("\n".join(_truncate(line, MAX_PANEL_ROW) for line in lines))
+
     def _show_run_detail(self, entry: RunEntry) -> None:
         run = entry.run
         extra: list[str] = []
@@ -1395,7 +1443,7 @@ class OpentineGUI:
             ),
             extra=extra,
         )
-        dpg.set_value("detail_text", _sanitize("\n".join(lines)))
+        dpg.set_value("detail_text", self._panel_text(lines))
 
     def _repo_trust_lines(self) -> list[str]:
         """A v3 run's trust story is the store's, not a file's."""
@@ -1407,7 +1455,7 @@ class OpentineGUI:
         ]
 
     def _show_step_detail(self, step: Step) -> None:
-        dpg.set_value("step_text", _sanitize("\n".join(_step_detail_lines(step))))
+        dpg.set_value("step_text", self._panel_text(_step_detail_lines(step)))
 
     def _clear_dag(self) -> None:
         # Links (slot 0) must go before nodes (slot 1): deleting a node that a
@@ -1675,7 +1723,7 @@ class OpentineGUI:
         ]
         if run.system_prompt:
             body.extend(["", "System prompt (full):", *_indent_block(run.system_prompt)])
-        self._show_text(f"Run {_truncate(run.id, 40)}", "\n".join(body))
+        self._show_text(f"Run {_oneline(_truncate(run.id, 40))}", "\n".join(body))
 
     def _expand_step_detail(self) -> None:
         step = self._selected_step
@@ -1691,7 +1739,7 @@ class OpentineGUI:
             "Outputs (full):",
             *_indent_block(_format_value(step.outputs, 200_000)),
         ]
-        self._show_text(f"Step {_truncate(step.id, 40)}", "\n".join(body))
+        self._show_text(f"Step {_oneline(_truncate(step.id, 40))}", "\n".join(body))
 
     # ------------------------------------------------------------ text viewer
 
@@ -1775,7 +1823,7 @@ class OpentineGUI:
     def _show_panel(self, title: str, subject: str, body: str) -> None:
         dpg.configure_item("panel_dialog", label=title)
         dpg.set_value("panel_subject", _oneline(subject))
-        dpg.set_value("panel_text", _sanitize(body))
+        dpg.set_value("panel_text", self._panel_text(body.split("\n")))
         self._center("panel_dialog", PANEL_DIALOG_SIZE)
 
     def _copy_panel(self) -> None:
@@ -1881,7 +1929,12 @@ class OpentineGUI:
     def _open_directory(self, new_dir: Path) -> None:
         self._runs_dir = new_dir
         self._source = open_source(new_dir)
+        # Not writable until a scan of the new source says so, and nothing
+        # pending from the old one.
         self._snapshot = Snapshot(root=new_dir)
+        self._select_after_scan = None
+        self._table_fingerprint = None
+        self._graph_fingerprint = ()
         self._entries = []
         self._errors = []
         self._run_filter = ""
@@ -2031,25 +2084,30 @@ class OpentineGUI:
         if path is None:
             return
         try:
-            if path.exists():
-                # Reload before writing: the cached snapshot can be up to one
-                # refresh interval stale, and pausing from it would truncate
-                # steps a still-running agent has since written.
-                fresh = Run.load(path)
-                if fresh.status != RunStatus.running:
-                    self._loader.request(force=True)
-                    self._note("warn", f"{run.id} is no longer running ({fresh.status.value})")
-                    return
-            else:
-                self._runs_dir.mkdir(parents=True, exist_ok=True)
-                fresh = run
+            if not path.exists():
+                # The row is up to one refresh interval stale. Writing here would
+                # not pause a run, it would recreate an artifact (and possibly the
+                # directory) that something else deleted while it was on screen.
+                self._loader.request(force=True)
+                self._note("warn", f"{_oneline(run.id)} is gone from disk; nothing to pause")
+                return
+            # Reload before writing: the cached snapshot can be up to one
+            # refresh interval stale, and pausing from it would truncate
+            # steps a still-running agent has since written.
+            fresh = Run.load(path)
+            if fresh.status != RunStatus.running:
+                self._loader.request(force=True)
+                self._note(
+                    "warn", f"{_oneline(run.id)} is no longer running ({fresh.status.value})"
+                )
+                return
             fresh.pause(path)
         except Exception as e:  # Run.load raises more than OSError on bad files
             self._note("error", f"Cannot pause: {e}")
             return
         _forget_run(path)
         self._loader.request(force=True)
-        self._note("ok", f"Paused {run.id}")
+        self._note("ok", f"Paused {_oneline(run.id)}")
 
     def _resume_selected(self) -> None:
         entry = self._entry_for_write()
@@ -2085,7 +2143,7 @@ class OpentineGUI:
         _forget_run(path)
         self._selected_run = resumed
         self._loader.request(force=True)
-        self._note("ok", f"Resumed {resumed.id}")
+        self._note("ok", f"Resumed {_oneline(resumed.id)}")
 
     def _fork_selected(self) -> None:
         """One-click fork onto main — the fast path."""
@@ -2199,7 +2257,7 @@ class OpentineGUI:
             self._set_status("Select a step to fork from")
             return
         run = entry.run
-        dpg.set_value("fork_subject", _sanitize(f"Fork {run.id} at step {step.id}"))
+        dpg.set_value("fork_subject", _oneline(f"Fork {run.id} at step {step.id}"))
         kept = retained_slice(run, step.id)
         if kept is None:
             dpg.set_value("fork_slice", "")
@@ -2262,7 +2320,7 @@ class OpentineGUI:
         when = _format_age(entry.mtime or getattr(run, "created_at", 0.0))
         model = _truncate(_oneline(run.model_info) or "-", 18)
         return (
-            f"{_elide_middle(str(run.id), 22)}  {run.status.value:<9} "
+            f"{_elide_middle(_oneline(run.id), 22)}  {run.status.value:<9} "
             f"{model:<18} {len(run.steps):>3} steps  {_cost_cell(run)}  {when}"
         )
 
@@ -2286,7 +2344,7 @@ class OpentineGUI:
         )
         dpg.configure_item("diff_candidates", items=labels, default_value=default)
         dpg.set_value("diff_candidates", default)
-        dpg.set_value("diff_subject", _sanitize(f"A: {entry.run.id}   - compare with:"))
+        dpg.set_value("diff_subject", _oneline(f"A: {entry.run.id}   - compare with:"))
         dpg.set_value("diff_text", "Pick a run and press Compare.")
         self._center("diff_dialog", DIFF_DIALOG_SIZE)
 
@@ -2304,7 +2362,7 @@ class OpentineGUI:
             body = _format_run_diff(entry.run, other.run)
         except Exception as e:
             body = f"Could not diff these runs: {e}"
-        dpg.set_value("diff_text", _sanitize(body))
+        dpg.set_value("diff_text", self._panel_text(body.split("\n")))
 
     def _copy_diff(self) -> None:
         self._copy_to_clipboard(str(dpg.get_value("diff_text")), "diff")
@@ -2339,7 +2397,7 @@ class OpentineGUI:
             return
         for child in dpg.get_item_children("transcript_body", slot=1) or []:
             dpg.delete_item(child)
-        dpg.set_value("transcript_subject", _sanitize(f"Transcript of {run.id}"))
+        dpg.set_value("transcript_subject", _oneline(f"Transcript of {run.id}"))
         turns = _transcript_turns(run)
         summary = _transcript_summary(run)
         if len(turns) > MAX_TRANSCRIPT_TURNS:
@@ -2601,7 +2659,7 @@ class OpentineGUI:
                 )
         self._show_panel(
             "Price this run",
-            f"{entry.run.id} - {_recorded_phrase(entry.run)}",
+            f"{_oneline(entry.run.id)} - {_recorded_phrase(entry.run)}",
             body
             + "\n\nRecorded cost is what the run itself claims. The figure above is what "
             "opentine's signed catalog says the same record is worth, computed here and "

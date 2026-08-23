@@ -74,7 +74,10 @@ HMAC_KEY_ENV = "OPENTINE_GUI_HMAC_KEY"
 #: Path to an Ed25519 public key, raw or hex, as `tine keygen` writes it.
 PUBLIC_KEY_ENV = "OPENTINE_GUI_PUBLIC_KEY"
 
-#: Preference keys the settings dialog writes. Paths only: a preferences file is
+#: Preference keys, hand-edited into the preferences JSON: the console has no
+#: settings dialog that writes them. Each holds a *path*, never the key itself —
+#: nothing can enforce that, so a value that fails to load is reported by the
+#: name of the setting and never by what it contained. Paths only: a preferences file is
 #: world-readable JSON in the user's config directory and is no place for a
 #: shared secret.
 HMAC_KEY_PREF = "trust_hmac_key_path"
@@ -228,7 +231,11 @@ def _hmac_from_path(path: Path, shown: str) -> bytes:
 #: value therefore never reaches a message, which is rendered in the trust panel
 #: and pasted into bug reports. Naming the variable and what was done with it is
 #: the more useful half anyway - the user can read their own environment.
-_ENV_AS_PATH = "value read as a file path"
+#: How a configured value is described when it has not (yet) produced a key.
+#: Never the value: the setting's name plus the failure is enough to fix a typo,
+#: and a value that failed to load is exactly the one that might be a secret
+#: someone pasted into a setting that asked for a path.
+_ENV_AS_PATH = "the value, read as a file path,"
 
 
 def _load_hmac(value: str, origin: str) -> tuple[bytes, str]:
@@ -252,31 +259,47 @@ def _load_public(value: str, origin: str) -> tuple[Any, bytes, str]:
 
     The key is coerced now rather than at verify time so a malformed file is one
     configuration problem instead of an `error` verdict on every artifact.
+
+    The configured value is never echoed until it has actually produced a key.
+    A public key is not a secret, but "the setting whose name says public key"
+    is exactly where a private seed gets pasted by mistake: opentine's keygen
+    prints the seed and the public key as two indistinguishable 64-hex strings.
+    A value that failed to load is described by the setting it came from, never
+    by what it held.
     """
-    # A public key is not a secret, so the configured value is safe to echo.
-    path = _key_path(value, _shown(value))
-    raw = _read_key_file(path, _shown(path))
+    path = _key_path(value, _ENV_AS_PATH)
+    raw = _read_key_file(path, _ENV_AS_PATH)
     if not HAS_ED25519 or ed25519_public_from_file is None:
-        raise _KeyProblem(f"{_shown(path)}: ed25519 needs the cryptography package")
+        raise _KeyProblem("ed25519 needs the cryptography package")
     try:
         key = ed25519_public_from_file(path)
     except Exception as exc:
-        raise _KeyProblem(f"{_shown(path)}: not an ed25519 public key") from exc
+        raise _KeyProblem("not an ed25519 public key") from exc
+    # Named only now that it loaded: a path that produced a key is not a secret.
     return key, raw, f"Ed25519 public key from {_shown(path)} ({origin})"
+
+
+#: Salt for the configuration fingerprint, drawn once per process. A fixed salt
+#: gives domain separation and no guessing resistance: one SHA-256 per candidate
+#: turns a published fingerprint into an offline oracle for a 16-byte
+#: passphrase, which MIN_HMAC_KEY_BYTES permits. The fingerprint only has to be
+#: stable for as long as the in-memory cache it keys, which is this process.
+_FINGERPRINT_SALT = os.urandom(16)
 
 
 def _fingerprint(material: list[bytes], trust_embedded: bool) -> str:
     """A stable id for one trust configuration that cannot be run back to the key.
 
     The verdict cache is keyed by this, so it must change whenever the key does,
-    and it is rendered nowhere but must survive being seen. Hence a purpose-salted
-    digest truncated to 64 bits: never the bare digest of the secret, which would
-    confirm a guessed key offline. Each part is length-prefixed so two different
+    and it must survive being seen — it appears in this object's repr and in a
+    cache key. Hence a per-process-salted digest truncated to 64 bits: never the
+    bare digest of the secret, and never a value another process could
+    recompute from a guess. Each part is length-prefixed so two different
     configurations cannot concatenate to the same bytes.
     """
     if not material and not trust_embedded:
         return ""
-    digest = hashlib.sha256(b"opentine-gui-trust-fp\0")
+    digest = hashlib.sha256(b"opentine-gui-trust-fp\0" + _FINGERPRINT_SALT)
     for item in material:
         digest.update(len(item).to_bytes(8, "big"))
         digest.update(item)
@@ -310,7 +333,10 @@ class TrustConfig:
     public_key: Any | None = None
     trust_embedded: bool = False
     source: str = "no key configured"
-    fingerprint: str = ""
+    # Also repr=False: it is salted per process, so it cannot be run back to a
+    # key, but a value that identifies which key is configured has no business
+    # in a traceback either.
+    fingerprint: str = field(default="", repr=False)
     problem: str = ""
 
     @property
@@ -350,12 +376,14 @@ def load_trust_config(preferences: dict[str, str] | None = None) -> TrustConfig:
         except _KeyProblem as exc:
             problems.append(f"{HMAC_KEY_ENV}: {exc}")
     elif pref_hmac:
-        # A preference is declared to be a path, never the secret, so unlike the
-        # environment value it is safe to name in a problem message.
+        # A preference is *declared* to be a path, but nothing enforces that: the
+        # file is hand-edited JSON, and a user who pastes the key itself there
+        # must not then see it rendered back in a trust row and copied onto the
+        # clipboard with the rest of the inspector. The value is named only once
+        # it has produced a key.
         try:
-            shown = _shown(pref_hmac)
-            hmac_key = _hmac_from_path(_key_path(pref_hmac, shown), shown)
-            sources.append(f"HMAC key from {shown} (preferences)")
+            hmac_key = _hmac_from_path(_key_path(pref_hmac, _ENV_AS_PATH), _ENV_AS_PATH)
+            sources.append(f"HMAC key from {_shown(pref_hmac)} (preferences)")
         except _KeyProblem as exc:
             problems.append(f"{HMAC_KEY_PREF}: {exc}")
     if hmac_key is not None:
@@ -518,18 +546,25 @@ def signature_line(verdict: Any, *, scheme: str = "") -> str:
 
 _INTEGRITY_SCOPE = (
     "Integrity covers the run body only: tags, fork reason, replay and budget"
-    " are outside the digest."
+    " state are outside the digest."
 )
 #: Said instead when a signature this build actually verified covers what the
 #: digest leaves out. Without this the two lines read as contradicting each
 #: other: one says the metadata is signed, the next that it is unprotected.
 _INTEGRITY_SCOPE_SIGNED = (
     "Integrity covers the run body only; the metadata it leaves out"
-    " (tags, fork reason, replay, budget) is covered by the signature above."
+    " (tags, fork reason, replay, budget state) is covered by the signature above."
 )
 _V1_SCOPE = "tine-sig/1 signs a frozen metadata allowlist: tags and fork reason are NOT signed."
+_V1_CLAIM = (
+    "This block names tine-sig/1, which would sign a frozen metadata allowlist"
+    " excluding tags and fork reason."
+)
 _V2_SCOPE = (
     "tine-sig/2 signs every metadata key but integrity, so tags and fork reason are covered."
+)
+_V2_CLAIM = (
+    "This block names tine-sig/2, which would cover every metadata key but integrity."
 )
 _UNKNOWN_SCOPE = (
     "This signature names no scheme this build knows; assume the narrower tine-sig/1 coverage."
@@ -571,10 +606,14 @@ def coverage_lines(verdict: Any, *, scheme: str = "", draft: bool = False) -> li
     if draft:
         detail.append(_DRAFT)
     if state in ("verified", "verified-tofu", "no-key"):
+        # Only a signature this build actually checked may state its coverage in
+        # the present indicative. For an unchecked one the block is a claim the
+        # artifact makes about itself, and the wording says so.
+        claimed = state != "verified"
         if scheme == SCHEME_V2:
-            detail.append(_V2_SCOPE)
+            detail.append(_V2_CLAIM if claimed else _V2_SCOPE)
         elif scheme == SCHEME_V1:
-            detail.append(_V1_SCOPE)
+            detail.append(_V1_CLAIM if claimed else _V1_SCOPE)
         else:
             detail.append(_UNKNOWN_SCOPE)
     covered = state == "verified" and scheme == SCHEME_V2

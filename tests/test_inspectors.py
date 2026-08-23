@@ -475,10 +475,14 @@ def test_a_key_that_could_not_be_loaded_is_reported_beside_the_verdicts(tmp_path
     assert config.problem and not config.configured
     rows = _rows(_trust_lines(path, config=config))
     assert len([x for x in rows if x.startswith("Signing key:")]) == 1
-    # ...and it names the path that failed: a row that merely exists leaves the
-    # mistyped path exactly as invisible as no row at all.
+    # ...naming the setting and the failure, so a mistyped path is diagnosable —
+    # but never the configured value itself. A value that failed to load as a key
+    # file is exactly the one that may be a secret pasted into a setting that
+    # asked for a path, and this row is rendered into the inspector and copied to
+    # the clipboard with the rest of it.
     row = next(x for x in rows if x.startswith("Signing key:"))
-    assert "missing.key" in row and "no such file" in row
+    assert HMAC_KEY_PREF in row and "no such file" in row
+    assert "missing.key" not in row
 
 
 def test_a_key_path_cannot_forge_a_verdict_either(tmp_path: Path) -> None:

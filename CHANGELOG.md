@@ -10,9 +10,12 @@ so this is a correctness release before it is a feature release: on the old floo
 erased causal edges whenever it saved a run, reported valid signatures as errors, and printed
 `$0.0000` for runs that had never been priced at all.
 
-**Requires `opentine >= 0.7.2`** (`< 0.9`). 0.7.1 is the strict correctness line — `causal_ids`
-round-tripping and `tine-sig/2` verification — and 0.7.2 adds the OpenTelemetry cost round trip
-and the source-confirmed pricing catalog that the import and pricing panels depend on.
+**Requires `opentine >= 0.7.2`** (`< 0.9`), and is tested against 0.8.0, which the lock pins.
+0.7.1 is the strict correctness line — `causal_ids` round-tripping and `tine-sig/2`
+verification — and 0.7.2 adds the OpenTelemetry cost round trip and the source-confirmed
+pricing catalog that the import and pricing panels depend on. opentine 0.8.0 adds
+`Step.provider`, which the console displays and, on older artifacts, recovers from the billing
+record.
 
 ### Added
 
@@ -140,6 +143,11 @@ and the source-confirmed pricing catalog that the import and pricing panels depe
   verdict and scheme moved to the loader thread, the per-run walks are memoised,
   both filters are debounced, and the table and graph are redrawn only when what
   they draw has changed. An idle tick is 37 ms.
+- **A save could silently drop a field this opentine cannot read.** opentine adds
+  step fields inside format v2 and its reader ignores keys it does not know, so
+  a console running an older library loads a newer artifact, drops the field in
+  memory, and destroys it on disk the moment it saves. Pause, resume and fork
+  now name what would go and ask first.
 - **Pause and Resume silently destroyed a signature.** `Run.save` rewrites `metadata.integrity`
   from scratch, dropping any signature block and any draft marker. Both actions now say what
   will be lost and ask, because the console cannot re-sign what it unsigned.

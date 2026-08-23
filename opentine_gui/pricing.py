@@ -178,9 +178,14 @@ def quote_run(
             detail=_join(note, _CATALOG_DETAIL or "no pricing catalog could be loaded"),
         )
     assumed = _truncate(_oneline(assume_provider), _NAME_LIMIT)
-    # opentine's own pass reads the provider off the step, so it cannot honour
-    # an assumption; when one is supplied the local rollup answers instead.
-    quotes = None if assumed else _upstream_quotes(run, when=when, pinned=pinned, catalog=catalog)
+    # opentine's own pass reads `Step.provider` and nothing else, so it cannot
+    # honour an assumption and cannot recover the provider from the billing
+    # record of an artifact written before that field existed — which is most of
+    # them, and exactly the runs a reader wants priced. The local rollup answers
+    # in both of those cases; the upstream pass answers when neither applies,
+    # because there should be one pricing arithmetic and not two.
+    upstream = not assumed and not _needs_recovery(steps)
+    quotes = _upstream_quotes(run, when=when, pinned=pinned, catalog=catalog) if upstream else None
     if quotes is None:
         quotes = [
             quote
@@ -433,6 +438,20 @@ def _quote_step(
     return StepQuote(
         ident, provider, name, status, amount, card_id, _first_warning(result), assumed
     )
+
+
+def _needs_recovery(steps: list[Any]) -> bool:
+    """Whether any billable step's provider has to be read out of its billing.
+
+    True for every artifact written before `Step.provider` (opentine 0.8.0),
+    which is what makes the difference between a priced run and a run reported
+    as entirely unknown.
+    """
+    for step in steps:
+        kind, provider, _model, _usage, _id = _read_record(step)
+        if kind in _PRICEABLE_KINDS and provider and not getattr(step, "provider", ""):
+            return True
+    return False
 
 
 def _upstream_quotes(

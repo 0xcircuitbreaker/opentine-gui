@@ -258,7 +258,9 @@ def test_provider_is_recovered_from_a_pinned_release_billing_record() -> None:
             {"rate_card_id": "openai:gpt-5"},
         ),
     )
-    assert not hasattr(run.steps[0], "provider")
+    # Either the field does not exist (0.7.2) or it exists and is empty (0.8.0
+    # reading an artifact written before it): both are the case this covers.
+    assert not getattr(run.steps[0], "provider", "")
     result = rollup([run], group_by="provider")
     assert sorted(_labels(result)) == ["anthropic", "openai"]
     assert result.total.runs == 1

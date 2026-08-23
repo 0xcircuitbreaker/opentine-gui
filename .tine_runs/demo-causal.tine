@@ -1,6 +1,6 @@
 {
   "cache": {},
-  "created_at": 1787456868.5261376,
+  "created_at": 1787464542.114028,
   "format_version": 2,
   "graph": {
     "order": [
@@ -97,6 +97,7 @@
         "parent_ids": [
           "c3"
         ],
+        "provider": "anthropic",
         "timestamp": 0.0,
         "tool_info": {},
         "usage": {
@@ -128,7 +129,7 @@
   "metadata": {
     "integrity": {
       "algorithm": "sha256",
-      "digest": "be2a71d1e28ad64a7ba50acdade30dd76f0e92b9a29716ad8658b4fa6ad9c3f7"
+      "digest": "eea498b3f775dc6e88c712036ecedc9d30c8b28275f4d6131cc2aa2e57ad6b7e"
     },
     "model_info": "claude-opus-5",
     "system_prompt": "",

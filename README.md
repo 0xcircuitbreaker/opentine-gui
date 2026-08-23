@@ -25,10 +25,17 @@ uv run tine-gui
 ```
 
 Requires Python 3.11+ and [`opentine`](https://github.com/0xcircuitbreaker/opentine) **0.7.2 or
-newer**, which `pip` installs for you. That floor is a correctness requirement, not a
-preference: opentine below 0.7.1 cannot read a step's `causal_ids` (so saving a run through an
-older library silently erases the causal edges a v3-derived run carries) and cannot verify a
-`tine-sig/2` signature (so it reports a valid signature as an error, which reads as tampering).
+newer**, which `pip` installs for you; the lock file and CI test against 0.8.0. That floor is a
+correctness requirement, not a preference: opentine below 0.7.1 cannot read a step's
+`causal_ids` (so saving a run through an older library silently erases the causal edges a
+v3-derived run carries) and cannot verify a `tine-sig/2` signature (so it reports a valid
+signature as an error, which reads as tampering).
+
+opentine keeps adding fields inside format v2 — `causal_ids` in 0.7.1, `provider` in 0.8.0 —
+and its reader ignores keys it does not know, so an older library loads a newer artifact and
+drops them. Rather than forbid the combination, the console checks before it writes: pause,
+resume and fork say what a save would drop and ask first. Recording a provider needs opentine
+0.8.0; the console recovers it from the billing record on artifacts written before that.
 
 Runs on **Windows, macOS and Linux** — lint and the whole test suite run on all
 three in CI.

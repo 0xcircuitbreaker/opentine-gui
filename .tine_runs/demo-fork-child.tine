@@ -1,6 +1,6 @@
 {
   "cache": {},
-  "created_at": 1787458608.5253522,
+  "created_at": 1787466282.1124787,
   "format_version": 2,
   "graph": {
     "order": [
@@ -50,7 +50,7 @@
     "forked_from": "demo-failed",
     "integrity": {
       "algorithm": "sha256",
-      "digest": "0654a8baee565f42cd10895ecfe4dbbdfe6fc1ea7e1620a196e307b756e2d5bd"
+      "digest": "2ddb5980f501f286f0b677ec55871e1f37b755f994ed6c21257f9936ae81dcd3"
     },
     "model_info": "claude-sonnet-4-6",
     "system_prompt": "",

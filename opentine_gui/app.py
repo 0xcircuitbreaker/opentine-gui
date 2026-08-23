@@ -82,6 +82,7 @@ from opentine_gui.sources import (
     RunEntry,
     Snapshot,
     _export_path,
+    _fields_a_save_would_drop,
     _forget_run,
     _safe_run_path,
     _short_oid,
@@ -2133,12 +2134,23 @@ class OpentineGUI:
         integrity = _verify_integrity_cached(path, stat_result)
         if integrity.get("draft"):
             losses.append("its draft/autosave marker")
+        dropped = _fields_a_save_would_drop(path)
+        if dropped:
+            # The artifact was written by a newer opentine than the one loaded
+            # here. Its reader ignores keys it does not know, so this save would
+            # write the run back without them — silently, and permanently.
+            losses.append(
+                "step fields this opentine cannot read ("
+                + ", ".join(_oneline(name) for name in dropped[:6])
+                + f", installed opentine {_OPENTINE_VERSION})"
+            )
         if not losses:
             return ""
         return (
-            f"Saving {path.name} will drop {' and '.join(losses)}: opentine rewrites the "
-            "integrity block on every save, and this console holds no signing key.\n\n"
-            "Continue?"
+            f"Saving {path.name} will drop {' and '.join(losses)}.\n\n"
+            "opentine rewrites the integrity block on every save, and this console holds "
+            "no signing key; a field the installed opentine cannot read is not written "
+            "back at all.\n\nContinue?"
         )
 
     def _pause_selected(self) -> None:

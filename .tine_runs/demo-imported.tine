@@ -1,6 +1,6 @@
 {
   "cache": {},
-  "created_at": 1787457768.5262258,
+  "created_at": 1787465442.1142097,
   "format_version": 2,
   "graph": {
     "order": [
@@ -23,7 +23,8 @@
           "text": "1. freeze writes 2. dual-write 3. backfill 4. cut over"
         },
         "parent_ids": [],
-        "timestamp": 1787457768.5261683,
+        "provider": "anthropic",
+        "timestamp": 1787465442.114084,
         "tool_info": {},
         "usage": {
           "input": 1000,
@@ -47,7 +48,8 @@
         "parent_ids": [
           "i1"
         ],
-        "timestamp": 1787457788.5261896,
+        "provider": "openai",
+        "timestamp": 1787465462.1141336,
         "tool_info": {},
         "usage": {
           "input": 800,
@@ -82,7 +84,7 @@
     },
     "integrity": {
       "algorithm": "sha256",
-      "digest": "25f4caeea1e6fc101fae6eedd1f56267e136945a85597d7e73350740e48672c5"
+      "digest": "0e93b9ab6b8436827df5041301a24466da93c368a221ed94d4759beb3dffa83d"
     },
     "model_info": "claude-opus-5",
     "system_prompt": "",

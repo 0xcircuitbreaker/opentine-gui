@@ -15,6 +15,7 @@ above do not have to know which one they are looking at.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -176,6 +177,42 @@ def _signature_verdict(
     if verifier is None:
         return _verify_cached(path, stat_result, "signature", Run.verify_signature)
     return _verify_cached(path, stat_result, f"signature:{fingerprint}", verifier)
+
+
+#: Step keys this build's `Step` can hold. `causal_ids` arrived in opentine
+#: 0.7.1 and `provider` in 0.8.0, so the set grows with the installed library —
+#: which is the point: what it cannot name, it cannot round-trip.
+_KNOWN_STEP_FIELDS = frozenset(getattr(Run, "__dataclass_fields__", {})) | frozenset(
+    getattr(__import__("opentine.core", fromlist=["Step"]).Step, "__dataclass_fields__", {})
+)
+
+
+def _fields_a_save_would_drop(path: Path) -> tuple[str, ...]:
+    """Step keys in this file that the installed opentine cannot read back.
+
+    opentine adds fields to a step within format v2 — `causal_ids`, then
+    `provider` — and its reader ignores keys it does not know. So an older
+    library loads a newer artifact happily, drops the field in memory, and
+    *destroys it on disk* the moment this console saves the run: pause, resume
+    or fork. That is the failure this console exists to prevent, so the write
+    actions ask first, naming what would go.
+
+    Cheap enough to run per write (writes are rare) and fail-open: an artifact
+    this cannot parse is one the write path will fail on anyway.
+    """
+    try:
+        if path.stat().st_size > MAX_TINE_BYTES:
+            return ()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        steps = data["graph"]["steps"]
+        records = steps.values() if isinstance(steps, dict) else steps
+        unknown: set[str] = set()
+        for record in records:
+            if isinstance(record, dict):
+                unknown |= set(record) - _KNOWN_STEP_FIELDS
+        return tuple(sorted(unknown))
+    except Exception:
+        return ()
 
 
 def _is_v3_repository(path: Path) -> bool:

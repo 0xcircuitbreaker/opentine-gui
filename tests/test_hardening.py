@@ -321,3 +321,41 @@ def test_preferences_are_written_through_an_unpredictable_temp_name(tmp_path: Pa
     assert [p.name for p in tmp_path.iterdir()] == ["preferences.json"]
     mode = stat.S_IMODE(target.stat().st_mode)
     assert not mode & (stat.S_IRWXG | stat.S_IRWXO), oct(mode)
+
+
+def test_a_save_that_would_drop_an_unreadable_field_says_so(tmp_path: Path) -> None:
+    # opentine adds step fields within format v2 — causal_ids in 0.7.1, provider
+    # in 0.8.0 — and its reader ignores keys it does not know. An older library
+    # therefore loads a newer artifact happily and destroys the field the moment
+    # this console saves: pause, resume or fork.
+    from opentine_gui.sources import _fields_a_save_would_drop
+
+    path = tmp_path / "abc.tine"
+    _run().save(path)
+    assert _fields_a_save_would_drop(path) == ()
+
+    raw = json.loads(path.read_text())
+    step = next(iter(raw["graph"]["steps"].values()))
+    step["future_field"] = "written by a newer opentine"
+    path.write_text(json.dumps(raw))
+    assert _fields_a_save_would_drop(path) == ("future_field",)
+
+
+def test_the_write_confirmation_names_what_would_be_lost(tmp_path: Path, gui_factory) -> None:
+    path = tmp_path / "abc.tine"
+    running = _run(status=RunStatus.running)
+    running.save(path)
+    raw = json.loads(path.read_text())
+    next(iter(raw["graph"]["steps"].values()))["provider"] = "anthropic"
+    path.write_text(json.dumps(raw))
+
+    from opentine.core import Step
+
+    gui = gui_factory(tmp_path)
+    gui._select_run("abc")
+    question = gui._signature_at_risk(path)
+    if "provider" in Step.__dataclass_fields__:
+        # This opentine can read the field, so there is nothing to lose by it.
+        assert "provider" not in question
+    else:
+        assert "provider" in question and "cannot read" in question

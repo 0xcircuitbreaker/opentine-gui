@@ -284,16 +284,16 @@ wheels = [
 
 [[package]]
 name = "opentine"
-version = "0.7.2"
+version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d9/5b/d8201f92de73096b9420e1f3bfd54e65a0ecb1b632d0d16c25c0a08b0216/opentine-0.7.2.tar.gz", hash = "sha256:1c6ddbbcdff8fcd3b75f703f72fa2d86b95aeba7e85e3db86e71db05d24d2589", size = 1177025, upload-time = "2026-08-22T21:37:19.12Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/54/24/acc5ae6c98f528923d55bbec41f56ceee62db2f055e7cad874e43fdfbd61/opentine-0.8.0.tar.gz", hash = "sha256:84bc34b0995db8900eaa77a49c4ba59c27111c4a620014ebf3f4288e75de8f58", size = 1208227, upload-time = "2026-08-23T03:57:35.838Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/b2/9c3bafd9350aa7ccba2182a9083a49696170610eabe03a901b99a6bdcf23/opentine-0.7.2-py3-none-any.whl", hash = "sha256:32041a529e7ad89e628644d06d7eb2778851e26a7b5b29c7864327a8b1a34fa6", size = 439240, upload-time = "2026-08-22T21:37:17.554Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/d0/19f9dcf4bc19ee38f23ae5b46b5c642fa0b280067d966ab6cc63bdb45ea3/opentine-0.8.0-py3-none-any.whl", hash = "sha256:82da57a3fcce649f25b4ea4d5b88160bf8aac508f48ed01e7e1169008c710c61", size = 456912, upload-time = "2026-08-23T03:57:34.299Z" },
 ]
 
 [[package]]

@@ -224,8 +224,10 @@ def quote_lines(quote: RunQuote, *, limit: int = 6) -> list[str]:
     # a prefix a reader can match against `tine price` output is the point of it.
     catalog = _oneline(quote.catalog_hash)[:12] or "unknown"
     lines = [f"Post-hoc price (catalog {catalog}, as of {_oneline(quote.effective_at)})"]
-    lines.append(f"  {'total'.ljust(14)}{_format_usd(quote.total_usd)}"
-                 f"  from {_plural(quote.priced, 'priced step')}")
+    # A total assembled from nothing is not zero: `$0.0000 from 0 priced steps`
+    # is the same "free" claim the whole module exists to avoid making.
+    total = _format_usd(quote.total_usd if quote.priced else None)
+    lines.append(f"  {'total'.ljust(14)}{total}  from {_plural(quote.priced, 'priced step')}")
     if quote.unknown:
         named = ", ".join(quote.unknown_models[:rows]) if rows else ""
         rest = len(quote.unknown_models) - rows

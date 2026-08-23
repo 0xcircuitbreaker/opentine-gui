@@ -95,7 +95,11 @@ def _format_value(value: object, limit: int) -> str:
     if isinstance(value, str):
         return _truncate(value, limit)
     try:
-        rendered = json.dumps(value, indent=2, sort_keys=True)
+        # ensure_ascii=False: this text is both rendered and searched, and
+        # escaping "café" to "caf\u00e9" made every non-ASCII payload
+        # unfindable by the words it actually contains. Surrogates and the
+        # invisible controls are handled by _sanitize on the way out.
+        rendered = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False)
     except (TypeError, ValueError):
         rendered = str(value)
     return _truncate(rendered, limit)
@@ -106,7 +110,7 @@ def _format_compact(value: object, limit: int) -> str:
     if isinstance(value, str):
         return _truncate(value, limit)
     try:
-        rendered = json.dumps(value, sort_keys=True, separators=(", ", ": "))
+        rendered = json.dumps(value, sort_keys=True, separators=(", ", ": "), ensure_ascii=False)
     except (TypeError, ValueError):
         rendered = str(value)
     return _truncate(rendered, limit)

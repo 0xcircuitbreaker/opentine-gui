@@ -11,6 +11,7 @@ than it showed. Preview and result have to agree, so both kinds are modelled.
 
 from __future__ import annotations
 
+import math
 import weakref
 
 from opentine.core import Run, Step, StepKind
@@ -220,11 +221,33 @@ def _node_label(step: Step, *, highlighted: bool = False) -> str:
     return _oneline(f"{prefix}{kind}: {_sanitize(step.short_id)}")
 
 
+def step_cost(step: Step) -> float:
+    """What this step cost, read the way opentine's own total reads it.
+
+    `Run.total_cost` prefers `billing["known_subtotal_usd"]` over `Step.cost`
+    (`_graph_run._step_cost_decimal`). Reading the bare field meant the step
+    inspector could state a number that contradicted the run total assembled
+    from the same steps, on any artifact whose writer set one and not the other.
+    """
+    billing = getattr(step, "billing", None)
+    if isinstance(billing, dict) and "known_subtotal_usd" in billing:
+        try:
+            value = float(billing["known_subtotal_usd"])
+        except (TypeError, ValueError, OverflowError):
+            value = None
+        if value is not None and math.isfinite(value) and value >= 0:
+            return value
+    try:
+        return float(step.cost)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
 def _node_subtitle(step: Step) -> str:
     """The second line of a node: who served it, what it cost, how long it took."""
     provider = step_provider(step)
     who = f"{provider}  " if provider else ""
-    return f"{who}{step.duration:.2f}s  ${step.cost:.4f}"
+    return f"{who}{step.duration:.2f}s  ${step_cost(step):.4f}"
 
 
 def _step_haystack(step: Step) -> list[str]:

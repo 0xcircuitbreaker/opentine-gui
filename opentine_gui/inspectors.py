@@ -24,6 +24,7 @@ from opentine_gui.graphmodel import (
     causal_edges,
     run_providers,
     step_causal_ids,
+    step_cost,
     step_provider,
 )
 from opentine_gui.pricing import _cost_is_attributable, unpriced_reason
@@ -441,6 +442,18 @@ def _trust_lines(path: Path | None, *, config=None) -> list[str]:
 # ---------------------------------------------------------------- run and step
 
 
+#: How many members of a list-valued field are named before the rest are
+#: counted. Both tags and refs are artifact-supplied and unbounded, and this
+#: runs on every render of the selected run.
+MAX_LISTED = 24
+
+
+def _joined(values: list[str], limit: int = MAX_LISTED) -> str:
+    shown = ", ".join(_oneline(value) for value in values[:limit])
+    extra = len(values) - limit
+    return f"{shown}, +{extra} more" if extra > 0 else shown
+
+
 def _run_detail_lines(
     run: Run, *, trust: list[str] | None = None, extra: list[str] | None = None
 ) -> list[str]:
@@ -491,10 +504,12 @@ def _run_detail_lines(
     if breach:
         lines.append(breach)
     if run.tags:
-        lines.append(f"Tags: {', '.join(_oneline(t) for t in sorted(run.tags))}")
+        lines.append(f"Tags: {_joined(sorted(run.tags))}")
     if run.refs:
-        refs = ", ".join(f"{_oneline(name)} -> {_oneline(tip)}" for name, tip in run.refs.items())
-        lines.append(f"Refs: {refs}")
+        lines.append(
+            "Refs: "
+            + _joined([f"{_oneline(name)} -> {_oneline(tip)}" for name, tip in run.refs.items()])
+        )
     lines.extend(trust or [])
     lines.extend(extra or [])
     if len(run_id) > 32:
@@ -518,7 +533,7 @@ def _step_detail_lines(step: Step) -> list[str]:
         f"Parents: {parents}",
         f"Model: {_oneline(step.model_info) or '(none)'}",
         f"Duration: {step.duration:.3f}s",
-        f"Cost: ${step.cost:.6f}",
+        f"Cost: ${step_cost(step):.6f}",
     ]
     provider = step_provider(step)
     if provider:
@@ -593,7 +608,8 @@ def _highlight_summary(run: Run, matches: set[str]) -> str:
         for step in run.steps
         if step.id in matches
     ]
-    return "Matches: " + ", ".join(labels[:6])
+    shown = ", ".join(labels[:6])
+    return f"Matches: {shown}, +{len(labels) - 6} more" if len(labels) > 6 else f"Matches: {shown}"
 
 
 #: Problems that still yield a usable run in the list, unlike a parse failure.

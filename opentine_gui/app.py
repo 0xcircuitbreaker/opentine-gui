@@ -38,6 +38,7 @@ from opentine_gui.desktop import (
     EXTRA_GLYPH_RANGES,
     FONT_SIZE,
     _detect_ui_scale,
+    _expand_user,
     _find_ui_font,
     _load_preferences,
     _preferences_path,
@@ -495,7 +496,7 @@ class OpentineGUI:
         self._preferences = _load_preferences()
         preferred_dir = self._preferences.get("last_runs_dir")
         if runs_dir is None and preferred_dir:
-            self._runs_dir = Path(preferred_dir).expanduser()
+            self._runs_dir = _expand_user(preferred_dir)
         else:
             self._runs_dir = runs_dir or DEFAULT_RUNS_DIR
         self._source = open_source(self._runs_dir)
@@ -929,7 +930,9 @@ class OpentineGUI:
 
     def _note(self, level: str, message: str) -> None:
         """Say something, in a place that the next refresh will not overwrite."""
-        text = _oneline(message)
+        # Bounded as well as flattened: a run id is artifact-controlled and
+        # unbounded, and it reaches this line through several action messages.
+        text = _truncate(_oneline(message), MAX_PANEL_ROW)
         if self._messages and self._messages[-1].text == text:
             # A failure inside the frame loop repeats at frame rate. One row
             # saying it happened 400 times is information; 400 identical rows
@@ -1923,7 +1926,7 @@ class OpentineGUI:
         if not raw:
             self._set_status("Type a directory to open")
             return
-        self._open_directory(Path(raw).expanduser())
+        self._open_directory(_expand_user(raw))
         dpg.configure_item("dir_picker", show=False)
 
     def _open_directory(self, new_dir: Path) -> None:
@@ -2333,8 +2336,18 @@ class OpentineGUI:
         if not others:
             self._set_status("Need a second run in this source to compare")
             return
-        self._diff_choices = {self._diff_label(e): e.key for e in others}
-        labels = list(self._diff_choices)
+        # Keyed by label, so two runs whose rows render identically would
+        # collapse into one and leave the other unreachable. An artifact owns its
+        # whole id, so agreeing on the elided head and tail is something it can
+        # simply choose to do; a repeated label gets a numbered suffix.
+        self._diff_choices = {}
+        labels: list[str] = []
+        for other in others:
+            label = self._diff_label(other)
+            if label in self._diff_choices:
+                label = f"{label}  #{len(labels) + 1}"
+            self._diff_choices[label] = other.key
+            labels.append(label)
         # A fork's origin is the comparison the user almost always wants.
         origin = str(entry.run.metadata.get("forked_from") or "")
         default = next(
@@ -2502,7 +2515,12 @@ class OpentineGUI:
         for, and it lands next to the store rather than inside it.
         """
         if self._snapshot.kind == "repository":
-            return Path(getattr(self._source, "root", self._runs_dir))
+            root = Path(getattr(self._source, "root", self._runs_dir))
+            # When the console was opened at the bare object directory, `root`
+            # *is* the store, and "beside it" is one level up.
+            if getattr(self._source, "tine_dir", None) == root:
+                return root.parent
+            return root
         return self._runs_dir
 
     def _write_export(self, run: Run, out_path: Path, *, overwrite: bool) -> None:
@@ -2568,7 +2586,7 @@ class OpentineGUI:
             self._set_status("Type the path of a trace file to import")
             return
         fmt = str(dpg.get_value("import_format") or "")
-        source = Path(raw).expanduser()
+        source = _expand_user(raw)
         try:
             imported = otelio.import_file(source, fmt="" if fmt == "auto" else fmt)
         except Exception as e:

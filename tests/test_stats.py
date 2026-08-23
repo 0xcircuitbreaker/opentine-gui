@@ -141,9 +141,23 @@ def test_status_grouping_totals_each_status() -> None:
 def test_model_grouping_counts_a_run_under_every_model_it_used() -> None:
     runs = [_run("a", model="declared", step_models=("used-a", "used-b"), costs=(0.1, 0.2))]
     result = rollup(runs, group_by="model")
-    assert _labels(result) == ["declared", "used-a", "used-b"]
+    assert sorted(_labels(result)) == ["declared", "used-a", "used-b"]
     assert result.total.runs == 1
     assert result.total.models == ("declared", "used-a", "used-b")
+
+
+def test_model_grouping_splits_the_cost_instead_of_repeating_it() -> None:
+    # A run appears under every model it used, but its money does not: adding
+    # the whole run cost to each key made the rows sum to more than the run,
+    # while `tine stats` (which groups on the declared model alone) never
+    # double-counted. The split is opentine's own `cost_breakdown().by_model`.
+    run = _run("a", model="", step_models=("claude-opus", "cheap-haiku"), costs=(10.0, 0.0))
+    result = rollup([run], group_by="model")
+    by_label = {bucket.label: bucket.cost for bucket in result.buckets}
+    assert by_label == {"claude-opus": 10.0, "cheap-haiku": 0.0}
+    assert math.isclose(sum(by_label.values()), result.total.cost)
+    # The dearest model leads, because the ordering is by attributed spend.
+    assert _labels(result)[0] == "claude-opus"
 
 
 def test_a_run_naming_no_model_groups_under_none() -> None:
@@ -246,14 +260,16 @@ def test_provider_is_recovered_from_a_pinned_release_billing_record() -> None:
     )
     assert not hasattr(run.steps[0], "provider")
     result = rollup([run], group_by="provider")
-    assert _labels(result) == ["anthropic", "openai"]
+    assert sorted(_labels(result)) == ["anthropic", "openai"]
     assert result.total.runs == 1
+    # And each provider carries what its own steps spent, not the run total.
+    assert {b.label: b.cost for b in result.buckets} == {"anthropic": 0.1, "openai": 0.2}
 
 
 def test_provider_grouping_reads_a_newer_steps_provider() -> None:
     run = _ForeignRun(steps=[_ForeignStep(provider="anthropic"), _ForeignStep(provider="openai")])
     result = rollup([run], group_by="provider")
-    assert _labels(result) == ["anthropic", "openai"]
+    assert sorted(_labels(result)) == ["anthropic", "openai"]
     assert result.total.runs == 1
 
 
@@ -322,13 +338,17 @@ def test_partial_pricing_marks_its_bucket_and_the_total() -> None:
     assert result.total.cost_partial is True
 
 
-def test_complete_or_unreadable_pricing_raises_no_caveat() -> None:
-    runs = [
-        _run("a", pricing={"complete": True}),
-        _run("b", pricing={"complete": "no"}),
-        _run("c", pricing="not-a-mapping"),
-    ]
-    assert rollup(runs).total.cost_partial is False
+def test_only_a_literal_true_counts_as_completely_priced() -> None:
+    # opentine's own rule (_runtime_accounting): anything that is not literally
+    # True — False, 0, "false", null — is not a proven-complete claim, and it
+    # breaches a strict_cost budget on exactly those values. Reading only
+    # `is False` let an artifact drop the lower-bound marker by writing "no".
+    assert rollup([_run("a", pricing={"complete": True})]).total.cost_partial is False
+    assert rollup([_run("c", pricing="not-a-mapping")]).total.cost_partial is False
+    assert rollup([_run("d", pricing={})]).total.cost_partial is False
+    for claim in ("no", None, 0, "true"):
+        result = rollup([_run("b", costs=(1.0,), pricing={"complete": claim})])
+        assert result.total.cost_partial is True, claim
 
 
 def test_a_lower_bound_cost_is_marked_in_the_rendered_block() -> None:
@@ -359,7 +379,9 @@ def test_a_string_where_a_cost_belongs_is_unreadable() -> None:
 def test_an_infinite_or_absurd_cost_is_unreadable() -> None:
     result = rollup([_ForeignRun(total_cost=float("inf")), _ForeignRun(total_cost=1e18)])
     assert result.unreadable == 2
-    assert result.total.cost == 0.0
+    # Nothing readable was priced, so there is no total to report. Absent, not
+    # zero: a zero here would read as "these runs cost nothing".
+    assert result.total.cost is None
 
 
 def test_a_negative_cost_is_unreadable() -> None:
@@ -518,7 +540,7 @@ def test_a_grouping_name_is_normalised() -> None:
 
 def test_empty_input_produces_an_empty_rollup() -> None:
     result = rollup([])
-    assert result.total == Bucket("all", 0, 0, 0.0, False, None, None, ())
+    assert result.total == Bucket("all", 0, 0, None, False, None, None, ())
     assert result.buckets == ()
     assert result.statuses == {} and result.formats == {} and result.tags == {}
     assert result.oldest == 0.0 and result.newest == 0.0

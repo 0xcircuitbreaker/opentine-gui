@@ -68,10 +68,14 @@ Two properties matter most, and both have regression tests:
   unverified rather than presenting it as attested. Metadata that is merely
   *editable* is expected, not a vulnerability.
 - **Verification results are cached** per file revision, keyed on path, size,
-  inode, mtime and ctime. On POSIX a rewrite always changes ctime, which no writer
-  can backdate. On Windows `st_ctime` is creation time, so a same-size rewrite that
-  also restores mtime can be served from cache until the file changes again. This
-  is documented rather than fixed; a report that improves on it is welcome.
+  inode, mtime and ctime. The guarantee that buys is a property of the
+  *filesystem*, not of POSIX: ext4, APFS and NTFS keep an independent change time
+  no writer can set, so a rewrite always misses the cache there. On Windows
+  `st_ctime` is creation time, and on FAT/exFAT, CIFS and several FUSE mounts
+  there is no independent change time at all — which is exactly how an artifact
+  someone sent you tends to arrive. On those, a same-size rewrite that also
+  restores mtime can be served from cache until the file changes again. This is
+  documented rather than fixed; a report that improves on it is welcome.
 - Denial of service that requires a file larger than `MAX_TINE_BYTES` (10 MiB),
   which is refused before parsing, or an import file larger than the import cap.
 - **A save destroys a signature.** `Run.save` recomputes the integrity block from

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 PREFERENCES_ENV = "OPENTINE_GUI_PREFS"
@@ -191,7 +192,7 @@ def _find_ui_font() -> Path | None:
     for candidate in candidates:
         if not candidate:
             continue
-        path = Path(candidate).expanduser()
+        path = _expand_user(candidate)
         try:
             if path.is_file():
                 return path
@@ -260,6 +261,21 @@ def _viewport_geometry() -> tuple[int, int, int, int]:
     return width, height, min_width, min_height
 
 
+def _expand_user(value: str | Path) -> Path:
+    """`Path(value).expanduser()`, without the failure mode that stops startup.
+
+    `expanduser` raises RuntimeError for `~someone` with no home directory, and
+    for `~` on a machine that has none. `last_runs_dir` is a value the console
+    writes into its own preferences file and users hand-edit and sync between
+    machines, so an unresolvable one has to cost the expansion, not the console.
+    """
+    path = Path(value)
+    try:
+        return path.expanduser()
+    except (OSError, RuntimeError, ValueError):
+        return path
+
+
 def _config_home() -> Path:
     """Per-user config directory following each platform's own convention.
 
@@ -268,7 +284,7 @@ def _config_home() -> Path:
     """
     override = os.environ.get("XDG_CONFIG_HOME")
     if override:
-        return Path(override).expanduser()
+        return _expand_user(override)
     if sys.platform == "win32":
         appdata = os.environ.get("APPDATA")
         return Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
@@ -280,7 +296,7 @@ def _config_home() -> Path:
 def _preferences_path() -> Path:
     override = os.environ.get(PREFERENCES_ENV)
     if override:
-        return Path(override).expanduser()
+        return _expand_user(override)
     return _config_home() / "opentine-gui" / PREFERENCES_FILE
 
 
@@ -301,7 +317,7 @@ def _load_preferences(path: Path | None = None) -> dict[str, str]:
     for candidate in candidates:
         try:
             raw = json.loads(candidate.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             continue
         if isinstance(raw, dict):
             return {str(k): str(v) for k, v in raw.items() if isinstance(v, str)}
@@ -312,11 +328,17 @@ def _save_preferences(preferences: dict[str, str], path: Path | None = None) -> 
     path = path or _preferences_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(preferences, indent=2, sort_keys=True) + "\n"
-    # Write-then-replace so a crash mid-write cannot truncate existing settings.
-    # os.replace is atomic on POSIX and Windows alike.
-    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    # Write-then-replace so a crash mid-write cannot truncate existing settings;
+    # os.replace is atomic on POSIX and Windows alike. Through mkstemp rather
+    # than a name derived from the pid: that name is predictable, and anything
+    # able to write to the config directory could pre-plant it as a symlink and
+    # have this write land wherever it pointed. mkstemp also creates the file
+    # 0600 instead of at the umask.
+    handle, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(name)
     try:
-        tmp.write_text(body, encoding="utf-8")
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(body)
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)

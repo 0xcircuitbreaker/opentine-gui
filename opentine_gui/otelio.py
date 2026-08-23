@@ -551,10 +551,16 @@ def import_file(path: str | Path, *, fmt: str = "", run_id: str = "") -> Importe
     if not import_available():
         raise RuntimeError("this opentine cannot import foreign traces")
     source = Path(path)
-    # Size before format: a missing or unreadable file must say so, and
-    # detect_format cannot — it answers "" for a file that is not there just as
-    # it does for one it does not recognise.
-    size = source.stat().st_size
+    # Size and *type* before format: a missing or unreadable file must say so,
+    # and detect_format cannot — it answers "" for a file that is not there just
+    # as it does for one it does not recognise. The type check is the important
+    # half: opening a FIFO blocks until something writes to it, and this runs on
+    # the render thread, so `os.mkfifo session.json` freezes the console until
+    # the process is killed. Same shape as trust._read_key_file.
+    info = source.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"{source.name} is not a regular file")
+    size = info.st_size
     if size > MAX_IMPORT_BYTES:
         raise ValueError(
             f"{source.name} is {size} bytes; this console imports at most {MAX_IMPORT_BYTES}"

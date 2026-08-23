@@ -104,9 +104,13 @@ class Bucket:
     label: str
     runs: int
     steps: int
-    cost: float
-    #: True when any run here was flagged incompletely priced, which makes
-    #: `cost` a lower bound rather than the spend.
+    #: None when nothing in this bucket was ever priced. Absent is not zero: a
+    #: directory of imported runs costs "-", not "$0.0000", exactly as the run
+    #: list already reports each of them.
+    cost: float | None
+    #: True when any run here was flagged incompletely priced, or when some of
+    #: its runs were priced and others recorded nothing, which makes `cost` a
+    #: lower bound rather than the spend.
     cost_partial: bool
     #: None means no run in this bucket recorded the figure. Never 0: a zero
     #: would be summed with real counts by whatever reads it next.
@@ -142,6 +146,14 @@ class _Facts:
     keys: tuple[str, ...]
     steps: int
     cost: float
+    #: What each of this run's keys actually spent. For a single-valued grouping
+    #: that is the whole cost under one key; for model and provider it is the
+    #: per-step split, because adding the run's total to every key it names
+    #: makes the buckets sum to more than the run.
+    costs: dict[str, float]
+    #: True when nothing priced this run at all, so its zero is an absence
+    #: rather than a measurement.
+    unrecorded: bool
     partial: bool
     tokens: int | None
     duration: float | None
@@ -213,7 +225,10 @@ def _pricing_incomplete(run: Any) -> bool:
     """
     try:
         pricing = run.manifest.get("pricing")
-        return isinstance(pricing, dict) and pricing.get("complete") is False
+        # `get("complete", True) is True`, not `is False`: opentine treats
+        # anything that is not literally True — False, 0, "false", null — as an
+        # unproven claim and breaches a strict_cost budget on exactly those.
+        return isinstance(pricing, dict) and pricing.get("complete", True) is not True
     except Exception:
         return False
 
@@ -402,18 +417,21 @@ def _facts(run: Any, group_by: str) -> _Facts | None:
     created = _number(_attr(run, "created_at")) or 0.0
     tags = _tags(run)
     models = _models(run, steps)
+    keys = _keys(
+        group_by,
+        status=status,
+        format_version=version,
+        created_at=created,
+        tags=tags,
+        models=models,
+        providers=_providers(steps),
+    )
     return _Facts(
-        keys=_keys(
-            group_by,
-            status=status,
-            format_version=version,
-            created_at=created,
-            tags=tags,
-            models=models,
-            providers=_providers(steps),
-        ),
+        keys=keys,
         steps=len(steps),
         cost=cost,
+        costs=_split_cost(run, steps, group_by, keys, cost),
+        unrecorded=_nothing_priced(run, steps, cost),
         partial=_pricing_incomplete(run),
         tokens=_tokens(steps),
         duration=_duration(steps),
@@ -425,18 +443,73 @@ def _facts(run: Any, group_by: str) -> _Facts | None:
     )
 
 
+def _split_cost(
+    run: Any, steps: list[Any], group_by: str, keys: tuple[str, ...], cost: float
+) -> dict[str, float]:
+    """This run's cost, divided among the keys that actually spent it."""
+    if group_by not in ("model", "provider") or len(keys) < 2:
+        return {key: cost for key in keys}
+    per_key: dict[str, float] = {}
+    if group_by == "model":
+        try:  # opentine's own per-model split, the one the inspector renders
+            by_model = run.cost_breakdown().by_model
+        except Exception:
+            by_model = {}
+        for name, amount in (by_model or {}).items():
+            value = _number(amount)
+            if value is None:
+                continue
+            key = _text(name) or NONE_KEY
+            per_key[key] = per_key.get(key, 0.0) + value
+    else:
+        for step in steps:
+            provider = _text(step_provider(step)) or UNRECORDED
+            value = _number(_attr(step, "cost", 0.0)) or 0.0
+            per_key[provider] = per_key.get(provider, 0.0) + value
+    # Any key the split did not answer for contributes nothing rather than the
+    # whole run: a bucket that cannot be attributed is not a bucket that spent.
+    return {key: per_key.get(key, 0.0) for key in keys}
+
+
+def _nothing_priced(run: Any, steps: list[Any], cost: float) -> bool:
+    """Whether this run's zero means "not priced" rather than "cost nothing".
+
+    The same reading `inspectors._recorded_cost_state` applies, kept here rather
+    than imported: that module pulls in the whole reader stack, and this needs
+    one boolean.
+    """
+    if cost:
+        return False
+    try:
+        billable = [s for s in steps if _text(_attr(_attr(s, "kind", ""), "value", "")) == "model"]
+        if not billable:
+            return True
+        for step in billable:
+            billing = _attr(step, "billing", None)
+            status = billing.get("status") if isinstance(billing, dict) else None
+            if isinstance(status, str) and status in ("complete", "partial", "unmetered"):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _bucket(label: str, group: list[_Facts]) -> Bucket:
     counted = [facts.tokens for facts in group if facts.tokens is not None]
     timed = [facts.duration for facts in group if facts.duration is not None]
+    priced = [facts for facts in group if not facts.unrecorded]
     return Bucket(
         label=label,
         runs=len(group),
         steps=sum(facts.steps for facts in group),
         # fsum, not sum: costs are four-decimal quantities opentine adds up in
         # Decimal, and a directory of thousands of them drifts visibly in the
-        # last place if they are accumulated pairwise.
-        cost=math.fsum(facts.cost for facts in group),
-        cost_partial=any(facts.partial for facts in group),
+        # last place if they are accumulated pairwise. None when nothing in the
+        # bucket was ever priced: absent is not zero, which is the rule this
+        # module exists to keep.
+        cost=math.fsum(facts.costs.get(label, facts.cost) for facts in group) if priced else None,
+        cost_partial=any(facts.partial for facts in group)
+        or bool(priced and len(priced) != len(group)),
         tokens=sum(counted) if counted else None,
         duration=math.fsum(timed) if timed else None,
         models=tuple(sorted({model for facts in group for model in facts.models})),
@@ -475,7 +548,10 @@ def rollup(runs: Iterable[Any], *, group_by: str = "status") -> Rollup:
     buckets = [_bucket(label, group) for label, group in members.items()]
     # Cost first because the question is what this cost, then run count, then
     # label so that two buckets that tie still order the same way every refresh.
-    buckets.sort(key=lambda bucket: (-bucket.cost, -bucket.runs, bucket.label))
+    # An unpriced bucket sorts as zero spend, but keeps its own cost of None:
+    # ordering by "how much did this cost" cannot be answered for it, and
+    # putting it last is the honest place for an unanswerable row.
+    buckets.sort(key=lambda bucket: (-(bucket.cost or 0.0), -bucket.runs, bucket.label))
     return Rollup(
         total=_bucket("all", everything),
         buckets=tuple(buckets),
@@ -489,8 +565,15 @@ def rollup(runs: Iterable[Any], *, group_by: str = "status") -> Rollup:
     )
 
 
-def _cost_text(value: float, partial: bool) -> str:
-    """Cost with the same ">=" lower-bound marker the run inspector uses."""
+def _cost_text(value: float | None, partial: bool) -> str:
+    """Cost with the same ">=" lower-bound marker the run inspector uses.
+
+    None renders "-", the same way every other never-recorded figure in this
+    module does: a run nothing priced has no cost to report, and "$0.0000" is a
+    measurement it never made.
+    """
+    if value is None:
+        return "-"
     return f"{'>=' if partial else ''}${value:.4f}"
 
 
@@ -560,10 +643,11 @@ def rollup_lines(result: Rollup, *, limit: int = 12) -> list[str]:
     if not total.runs:
         return ["No readable runs to summarise."] + ([caveat] if caveat else [])
 
+    mean = None if total.cost is None else total.cost / total.runs
     headline = (
         f"{total.runs:,} run(s), {total.steps:,} step(s), "
         f"cost {_cost_text(total.cost, total.cost_partial)} "
-        f"(mean {_cost_text(total.cost / total.runs, False)}/run)"
+        f"(mean {_cost_text(mean, False)}/run)"
     )
     lines = [
         headline,
@@ -625,7 +709,7 @@ def csv_rows(result: Rollup) -> list[list[str]]:
             _cell(bucket.label),
             str(bucket.runs),
             str(bucket.steps),
-            f"{bucket.cost:.4f}",
+            "" if bucket.cost is None else f"{bucket.cost:.4f}",
             "true" if bucket.cost_partial else "false",
             "" if bucket.tokens is None else str(bucket.tokens),
             "" if bucket.duration is None else f"{bucket.duration:.3f}",

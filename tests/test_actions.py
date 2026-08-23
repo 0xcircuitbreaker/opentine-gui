@@ -476,9 +476,14 @@ def test_a_repository_refuses_pause_resume_and_fork_and_says_why(tmp_path: Path,
     gui._resume_selected()
     gui._fork_selected()
 
-    refusals = [text for text in _notes(gui) if "v3 repository" in text]
-    assert len(refusals) == 3, _notes(gui)
-    assert all("tine repo-fork" in text for text in refusals), "it names the tool that can"
+    refusals = [m for m in gui._messages if "v3 repository" in m.text]
+    # One row, not three: the log collapses a line repeated back to back and
+    # counts it instead, so a refusal that fires on every click cannot push the
+    # rest of the log out of reach. The count is the assertion that all three
+    # actions refused.
+    assert len(refusals) == 1, _notes(gui)
+    assert refusals[0].repeats == 3, _notes(gui)
+    assert "tine repo-fork" in refusals[0].text, "it names the tool that can"
     assert _tree(root) == before, "a refused write must not touch the object store"
 
 

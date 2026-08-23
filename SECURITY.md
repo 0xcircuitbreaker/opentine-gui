@@ -27,7 +27,9 @@ opened **read-only**: writing into one would append an object and move a branch,
 so the write actions are disabled there, and the repository is attached in the
 way that creates no files — `Repo(<.tine dir>)` rather than `Repo.open(path)`,
 which would heal the layout and leave directories behind. A test asserts the
-repository tree is byte-identical before and after a scan.
+repository tree is byte-identical before and after a scan. An export you ask for
+still writes its `.otel.json`, beside the store in the worktree and never inside
+`.tine/`.
 
 Two properties matter most, and both have regression tests:
 

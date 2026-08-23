@@ -393,6 +393,8 @@ class _Message:
     level: str
     text: str
     at: float
+    #: How many times in a row this same line was reported.
+    repeats: int = 1
 
 
 class _Loader:
@@ -913,6 +915,20 @@ class OpentineGUI:
     def _note(self, level: str, message: str) -> None:
         """Say something, in a place that the next refresh will not overwrite."""
         text = _oneline(message)
+        if self._messages and self._messages[-1].text == text:
+            # A failure inside the frame loop repeats at frame rate. One row
+            # saying it happened 400 times is information; 400 identical rows
+            # are a scrollback that has pushed everything else out of reach.
+            self._messages[-1].repeats += 1
+            if dpg.does_item_exist("message_log"):
+                children = dpg.get_item_children("message_log", slot=1) or []
+                if children:
+                    dpg.set_value(
+                        children[-1],
+                        f"{time.strftime('%H:%M:%S')}  {text}"
+                        f"  (x{self._messages[-1].repeats})",
+                    )
+            return
         self._messages.append(_Message(level=level, text=text, at=time.time()))
         del self._messages[:-MAX_MESSAGES]
         if dpg.does_item_exist("status_bar"):
@@ -2421,7 +2437,12 @@ class OpentineGUI:
         self._write_export(run, out_path, overwrite=False)
 
     def _export_dir(self) -> Path:
-        """Where an export lands: beside the runs, or beside a repository."""
+        """Where an export lands: beside the runs, or beside a repository.
+
+        For a repository that is the worktree, never the `.tine` object store.
+        Reading a repository writes nothing; an export is a file the user asked
+        for, and it lands next to the store rather than inside it.
+        """
         if self._snapshot.kind == "repository":
             return Path(getattr(self._source, "root", self._runs_dir))
         return self._runs_dir

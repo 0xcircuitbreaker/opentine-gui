@@ -1,6 +1,6 @@
 [project]
 name = "opentine-gui"
-version = "0.2.0"
+version = "0.3.0"
 description = "Desktop GUI for opentine — browse, inspect, compare and fork agent runs"
 readme = "README.md"
 license = "Apache-2.0"
@@ -30,11 +30,14 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    # 0.4.0 makes a fork id identify the fork act, so forking the same step twice
-    # yields distinct runs. Below that, the GUI's fork action silently overwrites
-    # the previous fork of the same point. That is the real floor; 0.5.0 is
-    # additive over it and is what this release is tested against.
-    "opentine>=0.4.0",
+    # 0.7.1 is the correctness floor, not a preference. Below it opentine cannot
+    # read a `causal_ids` step field (so every console write erases the causal
+    # edges a v3-derived run carries) and cannot verify a `tine-sig/2`
+    # signature (so a valid signature is reported as an error, which reads as
+    # tampering). 0.7.2 additionally round-trips cost and billing through
+    # OpenTelemetry and ships the source-confirmed 75-card pricing catalog, both
+    # of which the import and pricing panels depend on being honest.
+    "opentine>=0.7.2,<0.9",
     "dearpygui>=2.0,<3",
 ]
 

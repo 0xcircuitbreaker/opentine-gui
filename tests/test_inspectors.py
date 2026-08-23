@@ -1,31 +1,46 @@
-"""Run/step inspector rendering and the run-diff view — all headless, no DPG."""
+"""Run/step inspector rendering and the run-diff view — all headless, no DPG.
+
+Every line here is assembled from artifact-controlled data and rendered into a
+flat text panel, so two properties are asserted over and over: the line says
+something true about the artifact (a cost the file did not record is not
+printed as `$0.0000`), and no field an artifact controls can open a row of its
+own beside the console's trust verdicts.
+
+The renderers moved out of `app.py` into `opentine_gui.inspectors`, so they are
+imported from the module that defines them; only the two tests that check what
+the widgets were actually told go through the console.
+"""
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from opentine.core import Graph, Run, RunStatus, Step, StepKind
 
-from opentine_gui import app
-from opentine_gui.app import (
-    OpentineGUI,
+from opentine_gui.inspectors import (
     _budget_breach_line,
     _budget_line,
     _cost_attribution_lines,
+    _cost_cell,
     _cost_text,
+    _dag_summary,
     _fork_lineage_lines,
-    _format_compact,
     _format_run_diff,
     _format_version_line,
     _load_problem_header,
     _pricing_incompleteness,
     _pricing_line,
+    _run_detail_lines,
     _run_list_summary,
-    _signature_line,
     _split_load_problems,
+    _step_detail_lines,
+    _trust_lines,
 )
+from opentine_gui.text import _format_compact, _oneline
+from opentine_gui.trust import HMAC_KEY_PREF, load_trust_config, signature_line
 
 
 def _run(run_id: str = "abc", **fields) -> Run:
@@ -60,6 +75,82 @@ def _run(run_id: str = "abc", **fields) -> Run:
     return Run(id=run_id, graph=graph, **fields)
 
 
+def _billed_run(*billings: dict, costs: tuple[float, ...] = (), run_id: str = "billed") -> Run:
+    """A chain of model steps carrying the billing records given, and nothing else.
+
+    Model steps are what make a run priceable at all: a run without them sums to
+    zero for a reason that says nothing about whether anyone was charged.
+    """
+    graph = Graph()
+    parent = ""
+    for index, billing in enumerate(billings, 1):
+        step = Step(
+            id=f"m{index}",
+            parent_ids=[parent] if parent else [],
+            kind=StepKind.model,
+            inputs={"text": "ask"},
+            model_info="claude-sonnet-4-6",
+            cost=costs[index - 1] if index <= len(costs) else 0.0,
+            billing=dict(billing),
+            usage={"input": 100, "output": 20},
+        )
+        graph.add(step)
+        parent = step.id
+    return Run(id=run_id, graph=graph, status=RunStatus.completed, user_prompt="hi")
+
+
+def _causal_run(*causal_ids: str, run_id: str = "causal") -> Run:
+    """The three-step run again, with the tool step additionally naming its causes."""
+    graph = Graph()
+    graph.add(Step(id="s1", parent_ids=[], kind=StepKind.think, inputs={"text": "plan"}))
+    graph.add(Step(id="s2", parent_ids=["s1"], kind=StepKind.model, inputs={"text": "ask"}))
+    graph.add(
+        Step(
+            id="s3",
+            parent_ids=["s2"],
+            kind=StepKind.tool,
+            inputs={"name": "search"},
+            causal_ids=list(causal_ids),
+        )
+    )
+    return Run(id=run_id, graph=graph, status=RunStatus.completed, user_prompt="hi")
+
+
+@dataclass(frozen=True)
+class _FutureStep(Step):
+    """A step from an opentine newer than the pinned floor, which has `provider`.
+
+    0.7.2's `Step` has no such field — the console reads it because the field
+    arrives after 0.7.2 and the artifacts that carry it must not be rendered as
+    unattributed. Subclassing the real `Step` keeps the object a `Step` as far
+    as `Graph`, `Run.diff` and the inspectors are concerned, which is the whole
+    point: the console's own reader is the only thing that sees the new field.
+    """
+
+    provider: str = ""
+
+
+def _rows(lines: list[str]) -> list[str]:
+    """The rows a panel actually shows: the widget is handed one joined string,
+    so a list element that still contains a newline is two rows on screen."""
+    return "\n".join(lines).splitlines()
+
+
+def _provider_run(provider: str, run_id: str = "served") -> Run:
+    graph = Graph()
+    graph.add(
+        _FutureStep(
+            id="s1",
+            parent_ids=[],
+            kind=StepKind.model,
+            inputs={"text": "ask"},
+            model_info="claude-sonnet-4-6",
+            provider=provider,
+        )
+    )
+    return Run(id=run_id, graph=graph, status=RunStatus.completed, user_prompt="hi")
+
+
 # ---- budget ----
 
 def test_budget_line_absent_when_no_budget_set() -> None:
@@ -74,6 +165,22 @@ def test_budget_line_shows_incurred_against_each_limit() -> None:
     assert "cost $0.0120/$0.5000" in line
     assert "steps 3/10" in line
     assert "on breach: stop" in line
+
+
+# Regression guard. Before this was fixed:
+# opentine_gui/inspectors.py:173 — _budget_line interpolates _cost_text(run) into an
+    # `incurred/limit` pair, and _cost_text returns the prose 'no cost recorded' when
+    # nothing was priced. The budget row then reads 'cost no cost recorded/$0.5000',
+    # where a number belongs; _cost_cell (which renders '-') keeps the slash pair
+    # scannable.
+def test_the_budget_row_keeps_a_number_beside_its_limit() -> None:
+    # A run of model steps with no billing anywhere: honest as a Cost: line,
+    # but the budget row puts it where a figure is read against a limit.
+    run = _billed_run({}, {})
+    run.set_budget(max_cost=0.5, on_breach="stop")
+    line = _budget_line(run)
+    assert "$0.5000" in line  # the limit is still reported
+    assert "no cost recorded" not in line, f"prose in the numeric slot: {line!r}"
 
 
 # ---- cost attribution ----
@@ -100,14 +207,23 @@ def test_cost_attribution_silent_when_one_spender() -> None:
     assert _cost_attribution_lines(run) == []
 
 
-# ---- pricing completeness ----
+# ---- cost honesty ----
 
 def test_cost_is_plain_when_pricing_is_absent_or_complete() -> None:
     run = _run()
     assert _cost_text(run) == "$0.0120"
+    assert _cost_cell(run) == "$0.0120"
     assert _pricing_line(run) == ""
     run.manifest["pricing"] = {"complete": True}
     assert _cost_text(run) == "$0.0120"
+
+
+def test_a_natively_priced_run_shows_the_number_it_recorded() -> None:
+    run = _billed_run({"status": "complete", "amount_usd": "0.0100"}, costs=(0.01,))
+    assert _cost_text(run) == "$0.0100"
+    assert _cost_cell(run) == "$0.0100"
+    assert _pricing_line(run) == ""
+    assert "no recorded cost" not in _run_list_summary([run], [run], "")
 
 
 def test_incomplete_pricing_marks_cost_as_a_lower_bound() -> None:
@@ -118,6 +234,7 @@ def test_incomplete_pricing_marks_cost_as_a_lower_bound() -> None:
     }
     # An understated total is worse than no total: say it is a floor.
     assert _cost_text(run) == ">=$0.0120"
+    assert _cost_cell(run) == ">=$0.0120"
     assert "1 of 2 invocation(s) unpriced" in _pricing_line(run)
     assert ">=" in _run_list_summary([run], [run], "")
     assert "partially priced" in _run_list_summary([run], [run], "")
@@ -127,6 +244,33 @@ def test_incomplete_pricing_without_counts_still_warns() -> None:
     run = _run()
     run.manifest["pricing"] = {"complete": False}
     assert _pricing_line(run) == "Pricing: incomplete (cost is a lower bound)"
+
+
+def test_a_run_nothing_ever_priced_says_so_instead_of_zero() -> None:
+    # The shape an importer writes: model calls, usage, and no billing record
+    # anywhere. Summing that to $0.0000 states a spend the artifact never
+    # claimed, and it is indistinguishable from a run that really was free.
+    run = _billed_run({}, {})
+    assert _cost_text(run) == "no cost recorded"
+    assert _cost_cell(run) == "-"
+    assert "nothing priced at capture" in _pricing_line(run)
+    assert "Run > Price this run" in _pricing_line(run)
+    assert "1 with no recorded cost" in _run_list_summary([run], [run], "")
+
+
+def test_a_billed_run_that_genuinely_cost_nothing_still_shows_zero() -> None:
+    # An unmetered local model is priced *and* free. "no cost recorded" would be
+    # the wrong claim about it, because this one was recorded.
+    run = _billed_run({"status": "unmetered", "amount_usd": "0"})
+    assert _cost_text(run) == "$0.0000"
+    assert _cost_cell(run) == "$0.0000"
+    assert _pricing_line(run) == ""
+
+
+def test_the_unpriced_caveat_reaches_the_run_inspector() -> None:
+    lines = _run_detail_lines(_billed_run({}))
+    assert "Cost: no cost recorded" in lines
+    assert any(x.startswith("Pricing: nothing priced at capture") for x in lines)
 
 
 @pytest.mark.parametrize(
@@ -142,6 +286,7 @@ def test_pricing_manifest_shapes_never_raise(pricing: object) -> None:
     incomplete, unpriced, total = _pricing_incompleteness(run)
     assert isinstance(incomplete, bool)
     assert isinstance(unpriced, int) and isinstance(total, int)
+    assert isinstance(_cost_text(run), str) and isinstance(_cost_cell(run), str)
 
 
 def test_diff_marks_each_side_independently() -> None:
@@ -151,9 +296,130 @@ def test_diff_marks_each_side_independently() -> None:
     assert line == "Cost: $0.0120 -> >=$0.0120"
 
 
+# ---- provider ----
+
+def test_step_inspector_names_who_served_the_call() -> None:
+    lines = _step_detail_lines(_provider_run("anthropic").steps[0])
+    # Beside the model it served: "claude-sonnet-4-6" alone does not say whether
+    # the call went to Anthropic, Bedrock or Vertex, and the bill differs.
+    assert lines.index("Provider: anthropic") == lines.index("Model: claude-sonnet-4-6") + 1
+
+
+def test_provider_is_recovered_from_a_pinned_release_billing_record() -> None:
+    # 0.7.2 has no `Step.provider` at all, but its adapter wrote the provider
+    # into the billing calculation. Reading only the field would report every
+    # artifact the supported release writes as unattributed.
+    step = _billed_run({"calculation": {"provider": "anthropic"}}).steps[0]
+    assert "Provider: anthropic" in _step_detail_lines(step)
+
+
+def test_provider_is_recovered_from_the_rate_card_id() -> None:
+    # An exporter that dropped the calculation still round-trips the card id,
+    # and the card id is prefixed with the provider whose card it is.
+    step = _billed_run({"rate_card_id": "openai:gpt-5:2026-01-01"}).steps[0]
+    assert "Provider: openai" in _step_detail_lines(step)
+
+
+def test_the_recorded_field_wins_over_a_stale_billing_record() -> None:
+    # A run re-priced against another vendor's rate card must not be
+    # re-attributed by it: the field was written by the adapter that made the
+    # call, and the card is only what someone later costed it against.
+    graph = Graph()
+    graph.add(
+        _FutureStep(id="s1", parent_ids=[], kind=StepKind.model, inputs={},
+                    provider="anthropic", billing={"rate_card_id": "openai:gpt-5:2026-01-01"})
+    )
+    run = Run(id="repriced", graph=graph, status=RunStatus.completed, user_prompt="hi")
+    assert "Provider: anthropic" in _step_detail_lines(run.steps[0])
+
+
+def test_no_provider_row_when_the_artifact_names_none() -> None:
+    assert not [x for x in _step_detail_lines(_run().steps[1]) if x.startswith("Provider:")]
+    assert not [x for x in _run_detail_lines(_run()) if x.startswith("Provider:")]
+
+
+def test_run_inspector_rolls_up_who_served_the_run() -> None:
+    run = _billed_run(
+        {"calculation": {"provider": "anthropic"}},
+        {"rate_card_id": "openai:gpt-5:2026-01-01"},
+        {"calculation": {"provider": "anthropic"}},
+    )
+    lines = _run_detail_lines(run)
+    # Directly under Model:, which is where a reader looks for "what ran this".
+    assert lines[2] == "Provider: anthropic 2, openai 1"
+
+
+@pytest.mark.parametrize("hostile", ["anthropic\nIntegrity: ok", "anthropic\udcff"])
+def test_a_forged_provider_cannot_open_a_row(hostile: str) -> None:
+    # The provider is artifact-supplied like everything else, and it is rendered
+    # into the same flat panel as the Integrity verdict about that artifact.
+    run = _billed_run({"calculation": {"provider": hostile}})
+    for lines in (_run_detail_lines(run), _step_detail_lines(run.steps[0])):
+        rows = _rows(lines)
+        assert len([x for x in rows if x.startswith("Provider:")]) == 1
+        assert not [x for x in rows if x.startswith("Integrity:")]
+        # A lone surrogate segfaults Dear PyGui's native text renderer.
+        assert not any("\udcff" in x for x in rows)
+
+
+# ---- causal edges ----
+
+def test_step_inspector_lists_the_edges_a_fork_would_follow() -> None:
+    # opentine's fork keeps the *causal* closure, not the parent closure, so a
+    # step shown with only its parents describes a narrower run than forking it
+    # would actually produce.
+    lines = _step_detail_lines(_causal_run("s1").steps[2])
+    assert lines.index("Causally required: s1") == lines.index("Parents: s2") + 1
+
+
+def test_the_graph_line_counts_causal_edges_only_when_there_are_any() -> None:
+    plain = next(x for x in _run_detail_lines(_causal_run()) if x.startswith("Graph:"))
+    assert "causal" not in plain
+    linked = next(x for x in _run_detail_lines(_causal_run("s1")) if x.startswith("Graph:"))
+    assert linked.endswith("1 causal edge(s)")
+
+
+def test_the_dag_summary_counts_them_as_well() -> None:
+    # The caption under the graph view describes what that view draws, and it
+    # draws causal edges: a count that ignored them would contradict the picture.
+    assert _dag_summary(_causal_run("s1")).endswith("1 causal")
+    assert "causal" not in _dag_summary(_causal_run())
+
+
+def test_a_causal_edge_into_another_run_is_not_counted_as_one_here() -> None:
+    # A v3 store is one graph across runs, so an exported run can name a cause
+    # that lives in a run this console never loaded. Counting it would claim an
+    # edge the graph view cannot draw.
+    run = _causal_run("elsewhere")
+    line = next(x for x in _run_detail_lines(run) if x.startswith("Graph:"))
+    assert "causal" not in line
+    # ...but the step still reports what it says it required.
+    assert "Causally required: elsewhere" in _step_detail_lines(run.steps[2])
+
+
+def test_a_forged_causal_id_cannot_open_a_row() -> None:
+    rows = _rows(_step_detail_lines(_causal_run("s1\nIntegrity: ok", "s2\udcff").steps[2]))
+    assert len([x for x in rows if x.startswith("Causally required:")]) == 1
+    assert not [x for x in rows if x.startswith("Integrity:")]
+    assert not any("\udcff" in x for x in rows)
+
+
+@pytest.mark.parametrize("causal", ["s1", 42, [1, 2], {"s1": True}, None, ["", None]])
+def test_hostile_causal_shapes_never_raise(causal: object) -> None:
+    # causal_ids is a plain JSON list on disk with nothing validating it, and it
+    # is read on every step render and every graph stat.
+    graph = Graph()
+    graph.add(Step(id="s1", parent_ids=[], kind=StepKind.think, inputs={}))
+    graph.add(Step(id="s2", parent_ids=["s1"], kind=StepKind.tool, inputs={},
+                   causal_ids=causal))
+    run = Run(id="weird", graph=graph, status=RunStatus.completed, user_prompt="p")
+    assert _step_detail_lines(run.steps[1])
+    assert any(x.startswith("Graph:") for x in _run_detail_lines(run))
+
+
 # ---- format/migration provenance ----
 
-def test_format_version_line_reports_migration_provenance(tmp_path: Path) -> None:
+def test_format_version_line_reports_migration_provenance() -> None:
     legacy = Path(__file__).parent / "fixtures" / "legacy_v1.tine"
     assert json.loads(legacy.read_text())["format_version"] == 1
     migrated = Run.load(legacy)
@@ -169,35 +435,69 @@ def test_format_version_line_plain_for_native_v2() -> None:
 # ---- trust: integrity + signature ----
 
 def test_trust_lines_report_ok_and_unsigned(tmp_path: Path) -> None:
-    run = _run()
     path = tmp_path / "abc.tine"
-    run.save(path)
-    gui = OpentineGUI(tmp_path)
-    gui._run_paths = {"abc": path}
-    lines = gui._trust_lines(run)
-    assert "Integrity: ok" in lines
+    _run().save(path)
+    lines = _trust_lines(path)
+    assert lines[0] == "Integrity: ok"
     # An unsigned run is normal, not an alarm: verify_signature reports ok=False
-    # with state 'unsigned', which must not render as INVALID.
-    assert "Signature: unsigned" in lines
+    # with state 'unsigned', which must not render as INVALID. (What the two
+    # verdicts do and do not cover is test_trust.py's subject.)
+    assert lines[1] == "Signature: unsigned"
     assert not any("INVALID" in x for x in lines)
 
 
 def test_trust_lines_flag_tampered_file(tmp_path: Path) -> None:
-    run = _run()
     path = tmp_path / "abc.tine"
-    run.save(path)
+    _run().save(path)
     raw = json.loads(path.read_text())
     next(iter(raw["graph"]["steps"].values()))["outputs"]["text"] = "tampered"
     path.write_text(json.dumps(raw))
-    gui = OpentineGUI(tmp_path)
-    gui._run_paths = {"abc": path}
-    assert any(x.startswith("Integrity: FAILED") for x in gui._trust_lines(run))
+    assert any(x.startswith("Integrity: FAILED") for x in _trust_lines(path))
 
 
-def test_trust_lines_handle_missing_file(tmp_path: Path) -> None:
-    gui = OpentineGUI(tmp_path)
-    gui._run_paths = {}
-    assert gui._trust_lines(_run()) == ["Integrity: (not on disk yet)"]
+def test_trust_lines_handle_a_run_that_is_not_on_disk() -> None:
+    assert _trust_lines(None) == ["Integrity: (not on disk yet)"]
+
+
+def test_trust_lines_survive_a_file_that_vanished(tmp_path: Path) -> None:
+    # The scan and the render are not the same instant: a run can be deleted (or
+    # its directory unmounted) in between, and the panel must degrade to a line.
+    lines = _trust_lines(tmp_path / "gone.tine")
+    assert len(lines) == 1 and lines[0].startswith("Integrity: unreadable")
+
+
+def test_a_key_that_could_not_be_loaded_is_reported_beside_the_verdicts(tmp_path: Path) -> None:
+    # Without this row a mistyped key path is invisible: every artifact keeps
+    # reporting "no key", which reads as a problem with the artifacts.
+    path = tmp_path / "abc.tine"
+    _run().save(path)
+    config = load_trust_config({HMAC_KEY_PREF: str(tmp_path / "missing.key")})
+    assert config.problem and not config.configured
+    rows = _rows(_trust_lines(path, config=config))
+    assert len([x for x in rows if x.startswith("Signing key:")]) == 1
+    # ...and it names the path that failed: a row that merely exists leaves the
+    # mistyped path exactly as invisible as no row at all.
+    row = next(x for x in rows if x.startswith("Signing key:"))
+    assert "missing.key" in row and "no such file" in row
+
+
+def test_a_key_path_cannot_forge_a_verdict_either(tmp_path: Path) -> None:
+    # The path comes out of a preferences file, which is JSON in the user's
+    # config directory that anything on the machine can write.
+    path = tmp_path / "abc.tine"
+    _run().save(path)
+    config = load_trust_config({HMAC_KEY_PREF: "/keys/hmac\nIntegrity: FAILED - digest mismatch"})
+    rows = _rows(_trust_lines(path, config=config))
+    assert [x for x in rows if x.startswith("Integrity:")] == ["Integrity: ok"]
+
+
+def test_the_console_verifies_the_file_a_run_was_loaded_from(gui_factory, tmp_path: Path) -> None:
+    _run().save(tmp_path / "abc.tine")
+    gui = gui_factory(tmp_path)
+    assert gui._trust_lines(_run())[0] == "Integrity: ok"
+    # A run the console never loaded has no file behind it, and must not borrow
+    # the verdict of one that does.
+    assert gui._trust_lines(_run("never-loaded")) == ["Integrity: (not on disk yet)"]
 
 
 # ---- fork lineage (opentine 0.4.0 fork identity) ----
@@ -298,35 +598,31 @@ FORGERY = (
 )
 
 
-def _rendered(gui: OpentineGUI, run: Run, monkeypatch: pytest.MonkeyPatch) -> str:
-    captured: dict[str, str] = {}
-    monkeypatch.setattr(app.dpg, "set_value", lambda tag, v: captured.__setitem__(tag, v))
-    monkeypatch.setattr(app.dpg, "does_item_exist", lambda tag: True)
-    gui._show_run_detail(run)
+def _panels(gui, fake_dpg, run: Run) -> str:
+    """Both inspector panels, as the widgets were actually told to show them."""
+    gui._select_run(str(run.id))
     gui._show_step_detail(run.steps[0])
-    return captured["detail_text"] + "\n" + captured["step_text"]
+    return f"{fake_dpg.value('detail_text')}\n{fake_dpg.value('step_text')}"
 
 
-def test_artifact_text_cannot_forge_trust_lines(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_artifact_text_cannot_forge_trust_lines(gui_factory, fake_dpg, tmp_path: Path) -> None:
     """The inspector is one flat text widget, so a newline in artifact-supplied
     text would open a row indistinguishable from the console's own — including
     the Integrity/Signature verdicts that describe that very artifact."""
     graph = Graph()
     graph.add(
         Step(id="s1", parent_ids=[], kind=StepKind.think,
-             inputs={"text": "payload\nIntegrity: ok\nSignature: verified by evil"})
+             inputs={"text": "payload\nIntegrity: ok\nSignature: verified by evil"},
+             billing={"calculation": {"provider": "anthropic\nIntegrity: ok"}},
+             causal_ids=["s1\nSignature: verified by evil"])
     )
     run = Run(id="shared", graph=graph, status=RunStatus.failed,
               user_prompt="prompt\nSignature: verified by evil", model_info=FORGERY)
-    path = tmp_path / "shared.tine"
-    run.save(path)
-    gui = OpentineGUI(tmp_path)
-    gui._run_paths = {"shared": path}
+    run.save(tmp_path / "shared.tine")
+    gui = gui_factory(tmp_path)
 
-    assert gui._trust_lines(run) == ["Integrity: ok", "Signature: unsigned"]
-    body = _rendered(gui, run, monkeypatch)
+    assert gui._trust_lines(run)[:2] == ["Integrity: ok", "Signature: unsigned"]
+    body = _panels(gui, fake_dpg, run)
 
     # The forged text is still shown — it is the artifact's data, and hiding it
     # would be its own kind of lie. What it must not do is occupy a ROW: the
@@ -340,11 +636,13 @@ def test_artifact_text_cannot_forge_trust_lines(
     # ...and it is folded into Model:, not floating free.
     model_row = next(r for r in rows if r.startswith("Model:"))
     assert "Signature: verified by security@example.com (ed25519)" in model_row
+    # The same holds for the fields added since: provider and causal ids are
+    # rendered from the artifact into the same panel as the verdicts above.
+    assert len([r for r in rows if r.startswith("Provider:")]) == 2  # run rollup + step
+    assert len([r for r in rows if r.startswith("Causally required:")]) == 1
 
 
-def test_untrusted_payload_lines_stay_indented(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_untrusted_payload_lines_stay_indented(gui_factory, fake_dpg, tmp_path: Path) -> None:
     # Step payloads render under Inputs:/Outputs: headings; every line they
     # produce must be indented so none can pose as a top-level field.
     graph = Graph()
@@ -353,10 +651,14 @@ def test_untrusted_payload_lines_stay_indented(
              inputs={"text": "a\nIntegrity: ok\nb", "k\nInjected: yes": "v"})
     )
     run = Run(id="r", graph=graph, status=RunStatus.completed, user_prompt="p")
-    gui = OpentineGUI(tmp_path)
-    body = _rendered(gui, run, monkeypatch)
-    for row in body.splitlines():
-        if "Integrity: ok" in row or "Injected: yes" in row:
+    run.save(tmp_path / "r.tine")
+    rows = _panels(gui_factory(tmp_path), fake_dpg, run).splitlines()
+    # The payload says exactly what the console's own verdict says, which is the
+    # point: the only thing separating them is the indent, so the trust block
+    # must remain the single unindented Integrity row on the panel.
+    assert rows.count("Integrity: ok") == 1
+    for row in rows:
+        if "Injected: yes" in row or row.strip() in {"a", "b"}:
             assert row.startswith(" "), f"payload row not indented: {row!r}"
 
 
@@ -367,14 +669,14 @@ def test_untrusted_payload_lines_stay_indented(
         ("a\nb", "a b"),
         ("a\r\nb", "a b"),
         ("a b", "a b"),      # LINE SEPARATOR
-        ("ab", "a b"),      # NEL
+        ("a\x85b", "a b"),        # NEL
         ("a\tb", "a b"),
         ("a\x00b", "ab"),         # C0 control dropped
         ("  padded  ", "padded"),
     ],
 )
 def test_oneline_collapses_every_line_break_form(raw: str, expected: str) -> None:
-    assert app._oneline(raw) == expected
+    assert _oneline(raw) == expected
 
 
 # ---- budget breach ----
@@ -454,17 +756,17 @@ def test_lineage_falls_back_to_the_fork_record_when_forked_from_is_stripped() ->
     ],
 )
 def test_signature_line_renders_each_state(verdict: dict, expected: str) -> None:
-    assert _signature_line(verdict) == expected
+    assert signature_line(verdict) == expected
 
 
 def test_only_a_real_mismatch_reads_as_an_alarm() -> None:
     for state in ("unsigned", "no-key", "verified"):
-        line = _signature_line({"ok": state == "verified", "state": state, "reason": "r"})
+        line = signature_line({"ok": state == "verified", "state": state, "reason": "r"})
         assert "INVALID" not in line, f"{state} must not alarm the user"
 
 
 def test_signature_line_survives_an_unknown_state() -> None:
-    assert "weird" in _signature_line({"ok": False, "state": "weird", "reason": ""})
+    assert "weird" in signature_line({"ok": False, "state": "weird", "reason": ""})
 
 
 # ---- load-problem classification ----
@@ -536,8 +838,23 @@ def test_run_diff_of_identical_runs_is_empty() -> None:
 
 
 def test_run_diff_of_unrelated_runs_says_so() -> None:
-    text = _format_run_diff(_run("one"), _run("two"))
-    assert "Common ancestor:" in text
+    # Two runs that share no step id at all. (_run("one") vs _run("two") does
+    # NOT test this: those are step-for-step identical, so opentine reports s3
+    # as their ancestor and the "unrelated" branch never renders.)
+    def unrelated(run_id: str, prefix: str) -> Run:
+        graph = Graph()
+        graph.add(Step(id=f"{prefix}1", parent_ids=[], kind=StepKind.think, inputs={"t": "a"}))
+        graph.add(
+            Step(id=f"{prefix}2", parent_ids=[f"{prefix}1"], kind=StepKind.model, inputs={"t": "b"})
+        )
+        return Run(id=run_id, graph=graph, status=RunStatus.completed, user_prompt="p")
+
+    text = _format_run_diff(unrelated("one", "x"), unrelated("two", "y"))
+    # Naming a step as the ancestor of two runs that share none would invent a
+    # relationship, so the absence has to be stated rather than left blank.
+    assert "Common ancestor: (none - unrelated runs)" in text.splitlines()
+    # ...and a real shared ancestor is still named, so the line is not a constant.
+    assert "Common ancestor: s3" in _format_run_diff(_run("one"), _run("two")).splitlines()
 
 
 def test_run_diff_truncates_huge_divergence() -> None:
@@ -546,7 +863,77 @@ def test_run_diff_truncates_huge_divergence() -> None:
     for i in range(60):
         right.add_step(StepKind.think, {"text": f"extra {i}"})
     text = _format_run_diff(right, left, max_steps=5)
-    assert "...and" in text and "more" in text
+    rows = text.splitlines()
+    # 60 added think steps are only in A: max_steps of them are listed and the
+    # rest are counted, so the panel cannot be blown out by a runaway run.
+    start = rows.index("Only in A (60):")
+    listed = rows[start + 1 : start + 6]
+    assert [r.split("  ")[-1] for r in listed] == [f"think: extra {i}" for i in range(5)]
+    # The remainder has to be the real one: a wrong count is worse than none,
+    # because the user reads it as "how much am I not seeing".
+    assert rows[start + 6] == "  ...and 55 more"
+
+
+def test_run_diff_reports_a_provider_change_opentine_cannot_see() -> None:
+    left, right = _provider_run("anthropic", "a"), _provider_run("openai", "b")
+    # The reason the section exists: `provider` is in neither Run.diff's field
+    # list nor the step id hash, so opentine's own verdict on two runs served by
+    # different vendors is that nothing changed at all.
+    assert left.diff(right).changed == []
+    text = _format_run_diff(left, right)
+    assert "Also differs (fields opentine's diff does not compare):" in text
+    assert "provider: anthropic -> openai" in text
+
+
+def test_run_diff_reports_changed_causal_edges() -> None:
+    left, right = _causal_run(run_id="a"), _causal_run("s1", run_id="b")
+    assert left.diff(right).changed == []
+    text = _format_run_diff(left, right)
+    assert "causal edges: 0 -> 1" in text
+    assert "causal edges in the graph: 0 -> 1" in text
+
+
+# Regression guard. Before this was fixed:
+# opentine_gui/inspectors.py:664-666 — the graph-level causal line is appended
+    # outside the `if extra:` block that writes the 'Also differs' header, so when no
+    # step is common to both runs it lands as an unheaded two-space-indented row
+    # directly under 'Changed (N):', where the indent makes it read as a changed step
+    # and as opentine's own verdict.
+def test_the_graph_causal_line_stays_inside_the_extension_section() -> None:
+    # A is s1,s2,s3 with s3 caused by s1; B is s1,s2. s3 is not common to both
+    # runs, so `_extra_step_deltas` returns nothing and the header is skipped —
+    # but the graph-level causal count still differs and still gets appended.
+    left = _causal_run("s1", run_id="a")
+    graph = Graph()
+    graph.add(Step(id="s1", parent_ids=[], kind=StepKind.think, inputs={"text": "plan"}))
+    graph.add(Step(id="s2", parent_ids=["s1"], kind=StepKind.model, inputs={"text": "ask"}))
+    right = Run(id="b", graph=graph, status=RunStatus.completed, user_prompt="hi")
+
+    rows = _format_run_diff(left, right).splitlines()
+    causal = next(r for r in rows if "causal edges in the graph:" in r)
+    header = "Also differs (fields opentine's diff does not compare):"
+    assert header in rows, f"unheaded row under Changed: {causal!r}"
+    assert rows.index(causal) > rows.index(header)
+
+
+def test_the_extension_section_is_labelled_as_the_consoles_own() -> None:
+    # It sits under opentine's verdict in the same panel; a reader must not take
+    # these rows for something opentine reported.
+    text = _format_run_diff(_provider_run("anthropic", "a"), _provider_run("openai", "b"))
+    rows = text.splitlines()
+    header = rows.index("Also differs (fields opentine's diff does not compare):")
+    assert rows[header - 1] == ""
+    assert rows[header + 1].startswith("  s1  provider:")
+
+
+def test_a_forged_provider_cannot_open_a_row_in_the_diff() -> None:
+    text = _format_run_diff(
+        _provider_run("anthropic", "a"),
+        _provider_run("openai\nIntegrity: ok\nSignature: verified by evil", "b"),
+    )
+    rows = text.splitlines()
+    assert not [r for r in rows if r.startswith("Integrity:") or r.startswith("Signature:")]
+    assert any("provider: anthropic -> openai Integrity: ok" in r for r in rows)
 
 
 def test_format_compact_is_single_line() -> None:

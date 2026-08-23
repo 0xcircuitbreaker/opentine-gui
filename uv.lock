@@ -284,21 +284,21 @@ wheels = [
 
 [[package]]
 name = "opentine"
-version = "0.5.0"
+version = "0.7.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/db/96/c64b4e0c009b4a4db10bde322c7cae402d26c0f6fbb8728b9d3a8f45c462/opentine-0.5.0.tar.gz", hash = "sha256:e750983fbc8aaee1982780bc4bf6598b11e38a90f986f4f814c599a6c46ac888", size = 730694, upload-time = "2026-07-31T22:38:40.488Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/5b/d8201f92de73096b9420e1f3bfd54e65a0ecb1b632d0d16c25c0a08b0216/opentine-0.7.2.tar.gz", hash = "sha256:1c6ddbbcdff8fcd3b75f703f72fa2d86b95aeba7e85e3db86e71db05d24d2589", size = 1177025, upload-time = "2026-08-22T21:37:19.12Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f0/d3/19fcd1145158fd9cfc6c8dbd9d0a607bdc1aa7de903515b505109c16adbe/opentine-0.5.0-py3-none-any.whl", hash = "sha256:909ebb9fe962aba4793c68a4f18648a997b8e0663c83c84f66242dea1940b864", size = 372848, upload-time = "2026-07-31T22:38:38.96Z" },
+    { url = "https://files.pythonhosted.org/packages/51/b2/9c3bafd9350aa7ccba2182a9083a49696170610eabe03a901b99a6bdcf23/opentine-0.7.2-py3-none-any.whl", hash = "sha256:32041a529e7ad89e628644d06d7eb2778851e26a7b5b29c7864327a8b1a34fa6", size = 439240, upload-time = "2026-08-22T21:37:17.554Z" },
 ]
 
 [[package]]
 name = "opentine-gui"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "dearpygui" },
@@ -313,7 +313,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dearpygui", specifier = ">=2.0,<3" },
-    { name = "opentine", specifier = ">=0.4.0" },
+    { name = "opentine", specifier = ">=0.7.2,<0.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0" },
 ]
 provides-extras = ["dev"]

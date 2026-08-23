@@ -1,432 +1,186 @@
-"""Dear PyGui application — 3-panel desktop dashboard for opentine runs.
+"""Dear PyGui application — the opentine run console.
 
 Layout:
-  Left:   Run list (table) + actions
+  Left:   Run list (search, table) + actions
   Center: Run detail + selected-step detail
-  Right:  DAG node editor (parent -> child)
+  Right:  Step DAG node editor (lineage and causal edges)
+  Bottom: Status line and a message log that does not scroll away
+
+Two invariants shape the code below.
+
+*Only the render thread touches Dear PyGui.* `manual_callback_management` puts
+every widget callback on a queue that this module's own loop drains between
+frames, so callbacks may build and delete items freely. The directory scan and
+artifact parsing run on a worker thread instead, and hand back plain data.
+
+*Everything an artifact says is untrusted.* Text from a run reaches a widget
+only through `opentine_gui.text`, and the console's own verdicts (integrity,
+signature, fork identity) are rendered so that no artifact-supplied string can
+be mistaken for one.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
-import re
+import queue
 import sys
+import threading
 import time
-import weakref
+from dataclasses import dataclass
 from pathlib import Path
 
 import dearpygui.dearpygui as dpg
 from opentine.core import Run, RunStatus, Step, StepKind
 
-try:
-    # opentine 0.4.0's only surface for the fork-id check. It is not exported
-    # from opentine.core, the package root, Run, the CLI or MCP, so a private
-    # import is the only option; a later rename must degrade, not crash.
-    from opentine._fork_identity import verify_fork_id
+from opentine_gui import __version__ as _GUI_VERSION
+from opentine_gui import otelio, pricing, stats, trust
+from opentine_gui.desktop import (
+    EXTRA_GLYPH_RANGES,
+    FONT_SIZE,
+    _detect_ui_scale,
+    _find_ui_font,
+    _load_preferences,
+    _preferences_path,
+    _px,
+    _recent_dirs,
+    _remember_dir,
+    _save_preferences,
+    _viewport_geometry,
+    _windows_set_dpi_aware,
+    set_ui_scale,
+)
+from opentine_gui.graphmodel import (
+    _matching_steps,
+    _node_label,
+    _node_subtitle,
+    _step_depths,
+    causal_edges,
+    retained_slice,
+)
+from opentine_gui.inspectors import (
+    _cost_cell,
+    _cost_text,
+    _dag_summary,
+    _format_run_diff,
+    _highlight_summary,
+    _load_problem_header,
+    _run_detail_lines,
+    _run_list_summary,
+    _split_load_problems,
+    _step_detail_lines,
+    _transcript_heading,
+    _transcript_summary,
+    _transcript_turns,
+    _trust_lines,
+)
+from opentine_gui.query import (
+    _query_error,
+    _run_matches_filter,
+)
+from opentine_gui.sources import (
+    RunEntry,
+    Snapshot,
+    _export_path,
+    _forget_run,
+    _safe_run_path,
+    _short_oid,
+    _verify_cached,
+    _verify_integrity_cached,
+    open_source,
+)
+from opentine_gui.text import (
+    _elide_middle,
+    _format_age,
+    _format_bytes,
+    _format_timestamp,
+    _format_value,
+    _indent_block,
+    _oneline,
+    _sanitize,
+    _truncate,
+)
+from opentine_gui.theme import (
+    ACCENT_ORANGE,
+    ACCENT_PURPLE,
+    ACCENT_RED,
+    BORDER_DEFAULT,
+    BORDER_STRONG,
+    BRAND,
+    BRAND_DIM,
+    LEVEL_COLORS,
+    RUN_STATUS_COLORS,
+    STATE_ACTIVE,
+    STATE_HOVER,
+    STATE_SELECTED,
+    STEP_COLORS,
+    SURFACE_APP,
+    SURFACE_BUTTON,
+    SURFACE_CARD,
+    SURFACE_INPUT,
+    SURFACE_PANEL,
+    SURFACE_SIDEBAR,
+    TEXT_FAINT,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    TRANSCRIPT_ROLE_COLORS,
+    _brighten,
+    _dim,
+    _rgba,
+)
+
+try:  # the installed opentine's version, for the About box and the status bar
+    from opentine import __version__ as _OPENTINE_VERSION
 except Exception:  # pragma: no cover - depends on the installed opentine
-    verify_fork_id = None
+    _OPENTINE_VERSION = "unknown"
 
 try:
-    # opentine 0.5.0. The declared floor is 0.4.0, so the export action is
-    # offered only when the installed opentine actually provides it.
+    #: opentine 0.5.0+, so the 0.7.2 floor guarantees it. Kept as a name here so
+    #: a future opentine that reshapes it costs the export action, not the app.
     from opentine import to_otel_genai_document
 except Exception:  # pragma: no cover - depends on the installed opentine
     to_otel_genai_document = None
 
-try:
-    # The same grammar `tine ls` and `tine search` accept. Present since 0.3.0;
-    # guarded so an older or reshaped opentine costs the field syntax, not the app.
-    from opentine.core import parse_query
-except Exception:  # pragma: no cover - depends on the installed opentine
-    parse_query = None
-
-SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]{0,127}$")
-MAX_TINE_BYTES = 10 * 1024 * 1024  # skip .tine files larger than 10 MiB
-
-# Win32 device names. They resolve as devices whatever the extension or case, so
-# "CON.tine" opens the console rather than a file.
-WINDOWS_RESERVED_STEMS = frozenset(
-    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
-    | {f"COM{i}" for i in range(1, 10)}
-    | {f"LPT{i}" for i in range(1, 10)}
-)
-
-
-def _windows_unsafe_name(run_id: str) -> bool:
-    """Whether <run_id>.tine is unusable as a filename on Windows.
-
-    Pure and platform-independent so it can be tested anywhere; only enforced
-    when actually running on Windows, since these names are valid elsewhere.
-    """
-    stem = run_id.split(".", 1)[0].upper()
-    return stem in WINDOWS_RESERVED_STEMS or run_id.endswith(" ")
-
-
-def _safe_run_path(runs_dir: Path, run_id: str) -> Path:
-    """Return runs_dir/<id>.tine iff run_id is safe and resolves inside runs_dir."""
-    if not SAFE_ID.fullmatch(run_id):
-        raise ValueError(f"unsafe run id: {run_id!r}")
-    if sys.platform == "win32" and _windows_unsafe_name(run_id):
-        raise ValueError(f"run id is not a usable Windows filename: {run_id!r}")
-    base = runs_dir.resolve()
-    target = (base / f"{run_id}.tine").resolve()
-    if base not in target.parents:
-        raise ValueError(f"path escapes runs dir: {target}")
-    return target
-
-BRAND = [120, 164, 255]
-BRAND_DIM = [84, 117, 184]
-
-SURFACE_APP = [31, 30, 27]
-SURFACE_SIDEBAR = [25, 24, 20]
-SURFACE_PANEL = [35, 34, 31]
-SURFACE_CARD = [39, 38, 34]
-SURFACE_INPUT = [31, 30, 27]
-SURFACE_BUTTON = [52, 50, 45]
-
-TEXT_PRIMARY = [230, 225, 216]
-TEXT_SECONDARY = [184, 177, 166]
-TEXT_MUTED = [150, 142, 131]
-TEXT_FAINT = [98, 91, 83]
-
-BORDER_DEFAULT = [52, 50, 45]
-BORDER_STRONG = [70, 67, 59]
-STATE_HOVER = [45, 43, 39]
-STATE_SELECTED = [30, 52, 76]
-STATE_ACTIVE = [32, 58, 85]
-
-ACCENT_GREEN = [121, 216, 157]
-ACCENT_ORANGE = [243, 161, 91]
-ACCENT_RED = [255, 138, 134]
-ACCENT_PURPLE = [182, 156, 255]
-ACCENT_TEAL = [100, 209, 200]
-ACCENT_YELLOW = [242, 200, 107]
-
-STEP_COLORS: dict[StepKind, list[int]] = {
-    StepKind.think: ACCENT_YELLOW,
-    StepKind.tool: BRAND,
-    StepKind.model: ACCENT_TEAL,
-    StepKind.done: ACCENT_GREEN,
-    StepKind.error: ACCENT_RED,
-}
-
-RUN_STATUS_COLORS: dict[RunStatus, list[int]] = {
-    RunStatus.running: BRAND,
-    RunStatus.paused: ACCENT_ORANGE,
-    RunStatus.completed: ACCENT_GREEN,
-    RunStatus.failed: ACCENT_RED,
-}
-
 DEFAULT_RUNS_DIR = Path(".tine_runs")
 AUTO_REFRESH_SECONDS = 2.0
 MAX_FORK_REASON = 4096
-# Kept in one place so the modal and its centering maths cannot drift apart.
-FORK_DIALOG_SIZE = (560, 330)
+#: Kept in one place so a modal and its centering maths cannot drift apart.
+FORK_DIALOG_SIZE = (600, 400)
+DIFF_DIALOG_SIZE = (820, 600)
+TRANSCRIPT_DIALOG_SIZE = (860, 640)
+TEXT_DIALOG_SIZE = (820, 600)
+PANEL_DIALOG_SIZE = (760, 560)
 NODE_PITCH_X = 250
 NODE_PITCH_Y = 170
-PREFERENCES_ENV = "OPENTINE_GUI_PREFS"
-PREFERENCES_FILE = "preferences.json"
-UI_SCALE_ENV = "OPENTINE_GUI_SCALE"
+#: Roughly five Dear PyGui items go into every node. A legal run can hold
+#: ~15,900 steps inside MAX_TINE_BYTES, which would be ~80,000 items built in
+#: one frame; the graph is drawn up to this many steps and says what it left out.
+MAX_DAG_NODES = 400
+#: The run table is rebuilt from scratch on every render, so it is bounded too.
+MAX_TABLE_ROWS = 500
+#: A transcript is artifact-supplied and unbounded: one turn becomes a heading,
+#: a button and a text block, so a 20,000-turn conversation would build ~60,000
+#: widgets in the frame that opens the dialog.
+MAX_TRANSCRIPT_TURNS = 500
+#: Messages kept in the log panel. Old ones scroll off, they do not vanish
+#: behind the next auto-refresh the way a single status line does.
+MAX_MESSAGES = 200
+#: A filter keystroke should not re-scan every payload of every run.
+FILTER_DEBOUNCE_SECONDS = 0.15
+#: Preferences are written to disk, so they are flushed on a pause in typing
+#: rather than on every character.
+PREFERENCES_FLUSH_SECONDS = 1.5
 
-#: Set once at startup from the display's DPI; every hardcoded pixel size in the
-#: layout goes through _px() so the console looks the same at 100% and 200%.
-_UI_SCALE = 1.0
+TABLE_COLUMNS = ("id", "status", "model", "steps", "cost", "age")
 
-
-def _windows_set_dpi_aware() -> None:
-    """Opt out of DWM bitmap-stretching before any window exists.
-
-    Must run whatever the scale ends up being: if the process stays DPI-unaware
-    while _px() also scales, Windows stretches an already-scaled window.
-    """
-    if sys.platform != "win32":
-        return
-    import ctypes
-
-    try:  # per-monitor v2 (Win10 1703+): crisp text, correct on mixed-DPI setups
-        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
-            return
-    except Exception:
-        pass
-    try:  # per-monitor v1
-        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
-            return
-    except Exception:
-        pass
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
-
-
-def _windows_dpi_scale() -> float:
-    import ctypes
-
-    try:
-        return ctypes.windll.user32.GetDpiForSystem() / 96.0
-    except Exception:
-        hdc = ctypes.windll.user32.GetDC(0)
-        try:
-            return ctypes.windll.gdi32.GetDeviceCaps(hdc, 88) / 96.0  # LOGPIXELSX
-        finally:
-            ctypes.windll.user32.ReleaseDC(0, hdc)
-
-
-def _linux_dpi_scale() -> float:
-    for var in ("GDK_SCALE", "QT_SCALE_FACTOR"):
-        value = os.environ.get(var)
-        if value:
-            try:
-                return float(value)
-            except ValueError:
-                continue
-    # Xft.dpi is the X11-standard setting; KDE, i3 and bare X sessions set it
-    # without exporting any toolkit variable.
-    for source in (_xrdb_dpi, _xresources_dpi):
-        dpi = source()
-        if dpi:
-            return dpi / 96.0
-    return 1.0
-
-
-def _xrdb_dpi() -> float | None:
-    import shutil
-    import subprocess
-
-    exe = shutil.which("xrdb")
-    if not exe:
-        return None
-    try:
-        out = subprocess.run(
-            [exe, "-query"], capture_output=True, text=True, timeout=5
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return _parse_xft_dpi(out)
-
-
-def _xresources_dpi() -> float | None:
-    try:
-        return _parse_xft_dpi((Path.home() / ".Xresources").read_text(encoding="utf-8"))
-    except OSError:
-        return None
-
-
-def _parse_xft_dpi(text: str) -> float | None:
-    match = re.search(r"^\s*Xft\.dpi\s*:\s*([0-9.]+)", text, re.MULTILINE)
-    if not match:
-        return None
-    try:
-        dpi = float(match.group(1))
-    except ValueError:
-        return None
-    return dpi if 48 <= dpi <= 480 else None
-
-
-def _detect_ui_scale() -> float:
-    """Display scale factor, 1.0 == 96 dpi. OPENTINE_GUI_SCALE overrides."""
-    override = os.environ.get(UI_SCALE_ENV)
-    if override:
-        try:
-            return min(3.0, max(0.5, float(override)))
-        except ValueError:
-            pass
-    try:
-        if sys.platform == "win32":
-            return min(3.0, max(0.5, _windows_dpi_scale()))
-        if sys.platform == "darwin":
-            # AppKit already hands the GL surface a Retina backing scale;
-            # scaling the layout again would double-count it.
-            return 1.0
-        return min(3.0, max(0.5, _linux_dpi_scale()))
-    except Exception:
-        return 1.0
-
-
-def _px(value: float) -> int:
-    """A design pixel in real device pixels at the current display scale."""
-    return max(1, int(round(value * _UI_SCALE)))
-
-
-#: Monospace faces with Latin-1/extended coverage, best first per platform. The
-#: layout aligns text in columns, so a proportional face would ragged it out.
-FONT_CANDIDATES: dict[str, tuple[str, ...]] = {
-    "win32": (
-        r"C:\Windows\Fonts\consola.ttf",
-        r"C:\Windows\Fonts\lucon.ttf",
-        r"C:\Windows\Fonts\cour.ttf",
-    ),
-    "darwin": (
-        "/System/Library/Fonts/Menlo.ttc",
-        "/System/Library/Fonts/SFNSMono.ttf",
-        "/Library/Fonts/Courier New.ttf",
-    ),
-    "linux": (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
-    ),
-}
-FONT_SIZE = 15
-
-#: Beyond ASCII+Latin-1: the punctuation, arrows and marks that routinely appear
-#: in model output and would otherwise draw as '?'.
-EXTRA_GLYPH_RANGES: tuple[tuple[int, int], ...] = (
-    (0x0100, 0x017F),  # Latin Extended-A
-    (0x2010, 0x205E),  # General Punctuation: dashes, quotes, ellipsis, bullets
-    (0x20A0, 0x20BF),  # Currency symbols
-    (0x2190, 0x21FF),  # Arrows
-    (0x2200, 0x22FF),  # Mathematical operators
-    (0x2500, 0x257F),  # Box drawing
-    (0x2713, 0x2718),  # Check marks and ballots
-)
-
-
-def _find_ui_font() -> Path | None:
-    """First readable monospace TTF for this platform, or None to keep DPG's default.
-
-    DPG's built-in bitmap font is ASCII-only, so without this every accented
-    character, CJK glyph or emoji in recorded agent output renders as '?'.
-    """
-    override = os.environ.get("OPENTINE_GUI_FONT")
-    candidates = (override,) if override else FONT_CANDIDATES.get(sys.platform, ())
-    for candidate in candidates:
-        if not candidate:
-            continue
-        path = Path(candidate).expanduser()
-        try:
-            if path.is_file():
-                return path
-        except OSError:
-            continue
-    return None
-
-
-def _screen_size() -> tuple[int, int] | None:
-    """Usable desktop size in device pixels, or None if it cannot be determined."""
-    try:
-        if sys.platform == "win32":
-            import ctypes
-
-            user32 = ctypes.windll.user32
-            size = (user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
-        elif sys.platform == "darwin":
-            # system_profiler takes seconds and reports backing-store pixels,
-            # while the viewport is sized in points. AppKit already keeps a
-            # window on-screen, so skip the probe entirely here.
-            return None
-        else:
-            import shutil
-            import subprocess
-
-            exe = shutil.which("xrandr")
-            if not exe:
-                return None
-            out = subprocess.run([exe], capture_output=True, text=True, timeout=2).stdout
-            # Prefer the primary output's own geometry; "current" is the virtual
-            # bounding box across all monitors, which is far too wide on a
-            # multi-head desktop.
-            match = re.search(r"\bconnected\s+primary\s+(\d+)x(\d+)", out) or re.search(
-                r"\bconnected(?:\s+primary)?\s+(\d+)x(\d+)", out
-            ) or re.search(r"current\s+(\d+)\s*x\s*(\d+)", out)
-            if not match:
-                return None
-            size = (int(match.group(1)), int(match.group(2)))
-        if size[0] > 0 and size[1] > 0:
-            return size
-    except Exception:
-        return None
-    return None
-
-
-def _viewport_geometry() -> tuple[int, int, int, int]:
-    """(width, height, min_width, min_height), never larger than the screen.
-
-    At 150-200% scaling the scaled default (e.g. 2160x1290) exceeds many
-    laptop panels, which would otherwise open the console partly offscreen with
-    a minimum size too large to shrink back.
-    """
-    width, height = _px(1440), _px(860)
-    min_width, min_height = _px(960), _px(600)
-    screen = _screen_size()
-    if screen:
-        max_w = max(640, int(screen[0] * 0.95))
-        max_h = max(480, int(screen[1] * 0.92))
-        width, height = min(width, max_w), min(height, max_h)
-    # The minimum must stay meaningfully below the opening size, or the window
-    # opens at its own minimum and cannot be shrunk at all.
-    min_width = min(min_width, max(640, width * 2 // 3))
-    min_height = min(min_height, max(400, height * 2 // 3))
-    return width, height, min_width, min_height
-
-
-def _config_home() -> Path:
-    """Per-user config directory following each platform's own convention.
-
-    An explicit XDG_CONFIG_HOME wins everywhere (opentine's own catalog overlay
-    honours it too, so a user who sets it keeps both in one place).
-    """
-    override = os.environ.get("XDG_CONFIG_HOME")
-    if override:
-        return Path(override).expanduser()
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        return Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support"
-    return Path.home() / ".config"
-
-
-def _preferences_path() -> Path:
-    override = os.environ.get(PREFERENCES_ENV)
-    if override:
-        return Path(override).expanduser()
-    return _config_home() / "opentine-gui" / PREFERENCES_FILE
-
-
-def _legacy_preferences_path() -> Path:
-    """Pre-0.2 location: ~/.config on every platform, including Windows/macOS."""
-    return Path.home() / ".config" / "opentine-gui" / PREFERENCES_FILE
-
-
-def _load_preferences(path: Path | None = None) -> dict[str, str]:
-    if path is not None:
-        candidates = [path]
-    elif os.environ.get(PREFERENCES_ENV):
-        # An explicit override means "use exactly this file"; falling back to the
-        # default location would import settings the user redirected away from.
-        candidates = [_preferences_path()]
-    else:
-        candidates = [_preferences_path(), _legacy_preferences_path()]
-    for candidate in candidates:
-        try:
-            raw = json.loads(candidate.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(raw, dict):
-            return {str(k): str(v) for k, v in raw.items() if isinstance(v, str)}
-    return {}
-
-
-def _save_preferences(preferences: dict[str, str], path: Path | None = None) -> None:
-    path = path or _preferences_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = json.dumps(preferences, indent=2, sort_keys=True) + "\n"
-    # Write-then-replace so a crash mid-write cannot truncate existing settings.
-    # os.replace is atomic on POSIX and Windows alike.
-    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-    try:
-        tmp.write_text(body, encoding="utf-8")
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+#: The pricing panel's "use what the artifact recorded" option, as opposed to
+#: assuming a provider for steps that recorded none.
+RECORDED_PROVIDER = "(as recorded)"
 
 _APP_THEME: int | None = None
 _BUTTON_THEMES: dict[str, int] = {}
+_NODE_THEMES: dict[tuple[int, int, int, bool], int] = {}
+_LINK_THEMES: dict[str, int] = {}
 
 
 def _reset_theme_caches() -> None:
@@ -435,1411 +189,10 @@ def _reset_theme_caches() -> None:
     _APP_THEME = None
     _BUTTON_THEMES.clear()
     _NODE_THEMES.clear()
+    _LINK_THEMES.clear()
 
 
-def load_runs(
-    runs_dir: Path,
-) -> tuple[list[Run], list[str], tuple[tuple[str, float, int], ...], dict[str, Path]]:
-    """Return (runs, errors, signature, paths) from one atomic directory scan.
-
-    paths maps run.id to the file it was loaded from (newest mtime wins on
-    duplicate ids) so actions write back to the real source file. Oversized
-    files are skipped with an error rather than decoded, to bound memory/CPU
-    on the auto-refresh loop. Integrity failures load but are surfaced as
-    errors — a digest mismatch is a warning, not a parse failure.
-    """
-    runs: list[Run] = []
-    errors: list[str] = []
-    sig_entries: list[tuple[str, float, int]] = []
-    paths: dict[str, Path] = {}
-    if not runs_dir.exists():
-        return runs, errors, (), paths
-    if _is_v3_repository(runs_dir):
-        # Say so instead of half-opening it: Run.load on a repository directory
-        # redirects to heads/main, which would show one run out of many, and
-        # Run.save would write a new object and move the branch.
-        errors.append(
-            f"{runs_dir.name}: this is an opentine v3 repository; this console "
-            "reads loose .tine files (use `tine repo-log` for repositories)"
-        )
-        return runs, errors, (), paths
-    files = []
-    for f in runs_dir.glob("*.tine"):
-        if f.is_dir():
-            continue  # a repository's own .tine/ directory, not a run file
-        try:
-            st = f.stat()
-        except OSError as e:
-            errors.append(f"{f.name}: {e}")
-            continue
-        files.append((f, st))
-        sig_entries.append((f.name, st.st_mtime, st.st_size))
-    files.sort(key=lambda pair: pair[1].st_mtime, reverse=True)
-    for f, st in files:
-        if st.st_size > MAX_TINE_BYTES:
-            errors.append(f"{f.name}: skipped ({st.st_size} bytes > {MAX_TINE_BYTES})")
-            continue
-        try:
-            run = Run.load(f)
-        except Exception as e:
-            errors.append(f"{f.name}: {e}")
-            continue
-        if run.id in paths:
-            # Two files claiming one run id: actions can only target one path, and
-            # a second identical row would be an unselectable dead click. Keep the
-            # newest (files are mtime-sorted) and say which file is shadowed.
-            # Short id: real ids are 64 hex chars, and the panel truncates rows.
-            errors.append(f"{f.name}: duplicate run id {_truncate(run.id, 14)}, "
-                          f"shadowed by {paths[run.id].name}")
-            continue
-        runs.append(run)
-        paths[run.id] = f
-        verdict = _verify_integrity_cached(f, st)
-        if not verdict["ok"]:
-            errors.append(f"{f.name}: integrity {verdict['reason']}")
-    sig_entries.sort()
-    return runs, errors, tuple(sig_entries), paths
-
-
-#: Digest and signature checks re-read the whole file, so results are memoised
-#: against (path, mtime, size): an unchanged file is verified once, not on every
-#: refresh of a directory a live agent keeps touching.
-_VERIFY_CACHE: dict[tuple[str, float, int, str], dict[str, object]] = {}
-_VERIFY_CACHE_MAX = 512
-
-
-def _verify_cached(path: Path, stat_result, kind: str, check) -> dict[str, object]:
-    """Cached IntegrityResult/SignatureResult fields for one file revision.
-
-    The key includes inode and change time, not just size and mtime: an integrity
-    check exists to catch tampering, and `os.utime` lets a writer restore mtime
-    after a same-length edit. POSIX will not let it backdate st_ctime, so any
-    rewrite still misses the cache. (On Windows st_ctime is creation time, so a
-    same-size, mtime-restored rewrite there can still be served from cache until
-    the file changes again.)
-    """
-    key = (
-        str(path),
-        stat_result.st_mtime_ns,
-        getattr(stat_result, "st_ctime_ns", 0),
-        stat_result.st_size,
-        stat_result.st_ino,
-        kind,
-    )
-    hit = _VERIFY_CACHE.get(key)
-    if hit is not None:
-        return hit
-    try:
-        result = check(path)
-    except Exception as e:
-        verdict: dict[str, object] = {"ok": False, "state": "error", "reason": f"check failed: {e}"}
-    else:
-        verdict = {
-            "ok": bool(getattr(result, "ok", False)),
-            "state": str(getattr(result, "state", "") or ""),
-            "reason": str(getattr(result, "reason", "") or ""),
-            "draft": bool(getattr(result, "draft", False)),
-            "signer": getattr(result, "signer", None),
-            "algorithm": getattr(result, "algorithm", None),
-        }
-    if len(_VERIFY_CACHE) >= _VERIFY_CACHE_MAX:
-        _VERIFY_CACHE.clear()
-    _VERIFY_CACHE[key] = verdict
-    return verdict
-
-
-def _verify_integrity_cached(path: Path, stat_result) -> dict[str, object]:
-    return _verify_cached(path, stat_result, "integrity", Run.verify_integrity)
-
-
-def _signature_line(verdict: dict[str, object]) -> str:
-    """Render a SignatureResult by its state.
-
-    ok=False is the normal case for both an unsigned run and a validly signed one
-    the GUI holds no key for, so only a real mismatch or malformed block may read
-    as an alarm.
-    """
-    state = str(verdict.get("state") or "")
-    reason = str(verdict.get("reason") or "")
-    signer = verdict.get("signer")
-    who = f" by {signer}" if signer else ""
-    if state == "verified":
-        algorithm = verdict.get("algorithm")
-        detail = f" ({algorithm})" if algorithm else ""
-        return f"Signature: verified{who}{detail}"
-    if state == "unsigned":
-        return "Signature: unsigned"
-    if state == "no-key":
-        return f"Signature: present{who}, not verified here (no key)"
-    if state == "mismatch":
-        return f"Signature: INVALID{who} - {reason}"
-    return f"Signature: {reason or state or 'unknown'}"
-
-
-def _is_v3_repository(path: Path) -> bool:
-    """Whether path is an opentine v3 repository, by the library's own rule.
-
-    Matches both a worktree (<dir>/.tine/config.json) and the object directory
-    itself (<dir>/config.json), which is what Run.load keys off when it silently
-    redirects a directory to Repo.open(...).load_run('heads/main').
-    """
-    try:
-        return path.is_dir() and (
-            (path / "config.json").is_file() or (path / ".tine" / "config.json").is_file()
-        )
-    except OSError:
-        return False
-
-
-def _dir_signature(runs_dir: Path) -> tuple[tuple[str, float, int], ...]:
-    if not runs_dir.exists():
-        return ()
-    entries: list[tuple[str, float, int]] = []
-    for f in runs_dir.glob("*.tine"):
-        try:
-            st = f.stat()
-        except OSError:
-            continue
-        entries.append((f.name, st.st_mtime, st.st_size))
-    entries.sort()
-    return tuple(entries)
-
-
-class OpentineGUI:
-    def __init__(self, runs_dir: Path | None = None) -> None:
-        self._preferences = _load_preferences()
-        preferred_dir = self._preferences.get("last_runs_dir")
-        if runs_dir is None and preferred_dir:
-            self._runs_dir = Path(preferred_dir).expanduser()
-        else:
-            self._runs_dir = runs_dir or DEFAULT_RUNS_DIR
-        self._runs: list[Run] = []
-        self._errors: list[str] = []
-        self._run_paths: dict[str, Path] = {}
-        self._selected_run: Run | None = None
-        self._selected_step: Step | None = None
-        self._last_signature: tuple = ()
-        self._last_check: float = 0.0
-        self._run_filter = self._preferences.get("last_filter", "").strip().lower()
-        self._step_filter = ""
-        self._layout_left = 0
-        self._layout_dag_cols = 0
-        self._relayout_pending = False
-        self._pending_select: str | None = None
-        self._force_refresh = False
-
-    def run(self) -> None:
-        global _UI_SCALE
-        _windows_set_dpi_aware()  # before any window, and whatever the scale is
-        _UI_SCALE = _detect_ui_scale()
-        _reset_theme_caches()
-        dpg.create_context()
-        # Dear PyGui dispatches every callback on a dedicated non-main thread.
-        # Selecting a run, typing in the DAG filter or confirming a fork all
-        # delete and recreate hundreds of node-editor items, which races the
-        # renderer mid-frame and crashes natively. Draining the queue ourselves
-        # runs every callback on the render thread, between frames.
-        dpg.configure_app(manual_callback_management=True)
-        dpg.bind_theme(_app_theme())
-        if not self._bind_ui_font() and _UI_SCALE != 1.0:
-            # No TTF available: scale the built-in bitmap font instead.
-            dpg.set_global_font_scale(_UI_SCALE)
-        width, height, min_width, min_height = _viewport_geometry()
-        dpg.create_viewport(
-            title="opentine - agent run console",
-            width=width,
-            height=height,
-            min_width=min_width,
-            min_height=min_height,
-        )
-
-        with dpg.window(tag="primary"):
-            with dpg.menu_bar():
-                with dpg.menu(label="File"):
-                    dpg.add_menu_item(label="Refresh", callback=self._refresh)
-                    dpg.add_menu_item(label="Change runs dir...", callback=self._open_dir_picker)
-                    dpg.add_separator()
-                    dpg.add_menu_item(label="Quit", callback=lambda: dpg.stop_dearpygui())
-                with dpg.menu(label="Run"):
-                    dpg.add_menu_item(
-                        label="Pause", callback=self._pause_selected, tag="menu_pause"
-                    )
-                    dpg.add_menu_item(
-                        label="Resume", callback=self._resume_selected, tag="menu_resume"
-                    )
-                    dpg.add_menu_item(
-                        label="Fork from step",
-                        callback=self._fork_selected,
-                        tag="menu_fork",
-                    )
-                    dpg.add_separator()
-                    dpg.add_menu_item(
-                        label="Fork to branch...",
-                        callback=self._open_fork_dialog,
-                        tag="menu_fork_branch",
-                    )
-                    dpg.add_separator()
-                    dpg.add_menu_item(
-                        label="Transcript...",
-                        callback=self._open_transcript,
-                        tag="menu_transcript",
-                    )
-                    dpg.add_separator()
-                    dpg.add_menu_item(
-                        label="Export as OpenTelemetry JSON",
-                        callback=self._export_otel,
-                        tag="menu_export_otel",
-                    )
-                    dpg.add_separator()
-                    dpg.add_menu_item(
-                        label="Compare with...",
-                        callback=self._open_diff_dialog,
-                        tag="menu_diff",
-                    )
-            self._build_top_bar()
-            with dpg.group(horizontal=True):
-                self._build_run_list()
-                self._build_detail_panel()
-                self._build_dag_panel()
-            dpg.add_separator()
-            with dpg.group(horizontal=True):
-                dpg.add_text("", tag="status_bar", color=TEXT_SECONDARY)
-                dpg.add_text("", tag="status_meta", color=TEXT_MUTED)
-
-        with dpg.window(label="Change runs directory", modal=True, show=False,
-                        tag="dir_picker", width=_px(560), height=_px(110), no_resize=True):
-            dpg.add_input_text(
-                tag="dir_picker_input",
-                default_value=_sanitize(str(self._runs_dir)),
-                width=-1,
-            )
-            with dpg.group(horizontal=True):
-                dpg.add_button(label="Apply", callback=self._apply_dir)
-                dpg.add_button(
-                    label="Cancel",
-                    callback=lambda: dpg.configure_item("dir_picker", show=False),
-                )
-
-        self._build_diff_dialog()
-        self._build_fork_dialog()
-        self._build_transcript_dialog()
-        self._build_key_bindings()
-
-        dpg.set_primary_window("primary", True)
-        dpg.set_viewport_resize_callback(self._on_viewport_resize)
-        dpg.setup_dearpygui()
-        dpg.show_viewport()
-        self._on_viewport_resize()
-        self._refresh()
-        while dpg.is_dearpygui_running():
-            try:
-                dpg.run_callbacks(dpg.get_callback_queue())
-                self._apply_pending_input()
-                self._apply_pending_relayout()
-                self._auto_refresh_tick()
-            except Exception as e:  # one bad .tine must not take down the console
-                self._set_status(f"Refresh failed: {e}")
-                self._last_signature = ()  # retry on the next tick
-            dpg.render_dearpygui_frame()
-        dpg.destroy_context()
-
-    def _build_key_bindings(self) -> None:
-        """Global shortcuts. Handlers fire off the render thread, so anything
-        that churns items records intent and lets the main loop apply it."""
-        with dpg.handler_registry(tag="global_keys"):
-            dpg.add_key_press_handler(dpg.mvKey_Down, callback=lambda: self._move_selection(1))
-            dpg.add_key_press_handler(dpg.mvKey_Up, callback=lambda: self._move_selection(-1))
-            dpg.add_key_press_handler(dpg.mvKey_Escape, callback=self._on_escape)
-            dpg.add_key_press_handler(dpg.mvKey_F, callback=self._on_ctrl_f)
-            dpg.add_key_press_handler(dpg.mvKey_C, callback=self._on_ctrl_c)
-            dpg.add_key_press_handler(dpg.mvKey_R, callback=self._on_ctrl_r)
-
-    def _typing(self) -> bool:
-        """True while a text field has focus, so keys reach the field, not us."""
-        return any(
-            dpg.does_item_exist(tag) and dpg.is_item_focused(tag)
-            for tag in ("run_filter", "step_filter", "dir_picker_input",
-                        "fork_branch", "fork_reason")
-        )
-
-    def _modal_open(self) -> str | None:
-        for tag in ("fork_dialog", "diff_dialog", "dir_picker"):
-            if dpg.does_item_exist(tag) and dpg.is_item_shown(tag):
-                return tag
-        return None
-
-    def _move_selection(self, delta: int) -> None:
-        if self._typing() or self._modal_open():
-            return
-        visible = self._filtered_runs()
-        if not visible:
-            return
-        ids = [r.id for r in visible]
-        if self._selected_run is None or self._selected_run.id not in ids:
-            index = 0
-        else:
-            index = min(max(ids.index(self._selected_run.id) + delta, 0), len(ids) - 1)
-        self._pending_select = ids[index]
-
-    def _on_escape(self) -> None:
-        modal = self._modal_open()
-        if modal:
-            dpg.configure_item(modal, show=False)
-        elif self._step_filter:
-            self._clear_step_filter()
-        elif self._run_filter:
-            dpg.set_value("run_filter", "")
-            self._on_filter_change(None, "")
-
-    def _on_ctrl_f(self) -> None:
-        if dpg.is_key_down(dpg.mvKey_ModCtrl) and dpg.does_item_exist("run_filter"):
-            dpg.focus_item("run_filter")
-
-    def _on_ctrl_c(self) -> None:
-        if dpg.is_key_down(dpg.mvKey_ModCtrl) and not self._typing():
-            self._copy_run_id()
-
-    def _on_ctrl_r(self) -> None:
-        if dpg.is_key_down(dpg.mvKey_ModCtrl) and not self._typing():
-            # An explicit flag, not a cleared signature: the tick is both rate
-            # limited and change gated, and () is the signature of an empty
-            # directory — so clearing it would reload everywhere except the one
-            # case where the user most wants confirmation that nothing is there.
-            self._force_refresh = True
-
-    def _apply_pending_input(self) -> None:
-        """Consume a keyboard-requested selection on the render thread."""
-        run_id, self._pending_select = self._pending_select, None
-        if run_id is not None and run_id != getattr(self._selected_run, "id", None):
-            self._select_run(run_id)
-
-    def _apply_pending_relayout(self) -> None:
-        """Rebuild the table/DAG a resize invalidated, between frames.
-
-        Dear PyGui delivers resize callbacks on its own thread while the render
-        thread is mid-frame; creating and deleting hundreds of node items from
-        there races the renderer. The callback only records what changed.
-        """
-        if not self._relayout_pending:
-            return
-        self._relayout_pending = False
-        if dpg.does_item_exist("run_table"):
-            self._render_run_table()
-        if self._selected_run is not None and dpg.does_item_exist("dag_editor"):
-            self._rebuild_dag(
-                self._selected_run, highlight=self._current_matches(self._selected_run)
-            )
-
-    def _build_top_bar(self) -> None:
-        with dpg.group(horizontal=True):
-            dpg.add_text("opentine", color=TEXT_PRIMARY)
-            dpg.add_text("agent run console", color=TEXT_MUTED)
-            dpg.add_spacer(width=20)
-            dpg.add_text(_sanitize(str(self._runs_dir)), tag="top_runs_dir", color=TEXT_MUTED)
-        dpg.add_separator()
-
-    def _on_viewport_resize(self, *_args) -> None:
-        """Scale panel widths and text wraps with the viewport; keep status bar visible."""
-        vw = dpg.get_viewport_client_width()
-        left = max(_px(260), min(_px(360), int(vw * 0.24)))
-        center = max(_px(360), min(_px(520), int(vw * 0.33)))
-        if dpg.does_item_exist("panel_runs"):
-            dpg.configure_item("panel_runs", width=left)
-        if dpg.does_item_exist("panel_detail"):
-            dpg.configure_item("panel_detail", width=center)
-        for tag, wrap in (
-            ("run_summary", left - _px(40)),
-            ("err_text", left - _px(28)),
-            ("detail_text", center - _px(28)),
-            ("step_text", center - _px(28)),
-            ("dag_summary", max(_px(320), vw - left - center - _px(90))),
-        ):
-            if dpg.does_item_exist(tag):
-                dpg.configure_item(tag, wrap=wrap)
-        # Four buttons plus inter-item spacing must fit the panel's content box;
-        # no floor, or the row overflows and the last button is clipped.
-        spacing = _px(8)
-        button_w = max(_px(34), (left - _px(30) - 3 * spacing) // 4)
-        for tag in ("btn_pause", "btn_resume", "btn_fork", "btn_diff"):
-            if dpg.does_item_exist(tag):
-                dpg.configure_item(tag, width=button_w)
-        # Inspector headers share a row with their Copy button; below this the
-        # subtitle is dropped so the button keeps its place.
-        compact = center < _px(430)
-        for tag, subtitle in (
-            ("panel_detail_subtitle", "Trace metadata"),
-            ("panel_step_subtitle", "Inputs, outputs, cost"),
-        ):
-            if dpg.does_item_exist(tag):
-                dpg.configure_item(tag, show=not compact)
-                dpg.set_value(tag, subtitle)
-        # Only flag a rebuild when the resize actually changes the layout, and
-        # let the main loop do it — see _apply_pending_relayout.
-        cols = max(1, self._dag_avail_width() // _px(NODE_PITCH_X))
-        if left != self._layout_left or cols != self._layout_dag_cols:
-            self._relayout_pending = True
-        self._layout_left = left
-        self._layout_dag_cols = cols
-
-    def _build_run_list(self) -> None:
-        with dpg.child_window(width=_px(340), height=-_px(34), border=True, tag="panel_runs"):
-            _panel_header("Runs", "Search, select, and manage traces")
-            dpg.add_input_text(
-                hint="Search, or status:failed model:opus cost:>0.01 tag:bug",
-                tag="run_filter",
-                default_value=self._run_filter,
-                width=-1,
-                callback=self._on_filter_change,
-            )
-            dpg.add_text("", tag="run_summary", wrap=300, color=[180, 180, 180])
-            with dpg.group(horizontal=True):
-                _action_button("Pause", self._pause_selected, "btn_pause")
-                _action_button("Resume", self._resume_selected, "btn_resume")
-                _action_button("Fork", self._fork_selected, "btn_fork")
-                _action_button("Diff", self._open_diff_dialog, "btn_diff")
-            dpg.add_separator()
-            with dpg.table(
-                header_row=True,
-                borders_innerH=True,
-                borders_outerH=True,
-                row_background=True,
-                resizable=False,
-                policy=dpg.mvTable_SizingStretchProp,
-                tag="run_table",
-            ):
-                dpg.add_table_column(label="ID")
-                dpg.add_table_column(label="Status")
-                dpg.add_table_column(label="Cost")
-            dpg.add_separator()
-            dpg.add_text("Load errors", color=ACCENT_ORANGE, tag="err_header", show=False)
-            dpg.add_text("", tag="err_text", wrap=312, color=ACCENT_ORANGE)
-
-    def _build_detail_panel(self) -> None:
-        with dpg.child_window(width=_px(480), height=-_px(34), border=True, tag="panel_detail"):
-            with dpg.group(horizontal=True):
-                _panel_header("Run inspector", "Trace metadata", "panel_detail_subtitle")
-                dpg.add_spacer(width=_px(8))
-                # Ids are hashes and get elided on screen; the CLI needs them whole.
-                _action_button("Copy id", self._copy_run_id, "btn_copy_run", width=0)
-            dpg.add_separator()
-            dpg.add_text("Select a run", tag="detail_text", wrap=452, color=TEXT_SECONDARY)
-            dpg.add_spacer(height=10)
-            with dpg.group(horizontal=True):
-                _panel_header("Step inspector", "Inputs, outputs, cost", "panel_step_subtitle")
-                dpg.add_spacer(width=_px(8))
-                _action_button("Copy id", self._copy_step_id, "btn_copy_step", width=0)
-            dpg.add_separator()
-            dpg.add_text(
-                "Select a step in the DAG",
-                tag="step_text",
-                wrap=452,
-                color=TEXT_SECONDARY,
-            )
-
-    def _build_dag_panel(self) -> None:
-        with dpg.child_window(border=True, height=-_px(34), tag="panel_dag"):
-            _panel_header("Step DAG", "Parent-child execution graph")
-            dpg.add_text(
-                "Select a run to inspect its opentine step graph.",
-                tag="dag_summary",
-                wrap=580,
-                color=TEXT_SECONDARY,
-            )
-            with dpg.group(horizontal=True):
-                dpg.add_input_text(
-                    hint="Highlight: id, kind, tool, payload (Enter)",
-                    tag="step_filter",
-                    width=_px(360),
-                    callback=self._on_step_filter_change,
-                    on_enter=True,
-                )
-                dpg.add_button(label="Clear", callback=self._clear_step_filter, width=_px(70))
-            with dpg.group(horizontal=True):
-                for kind in StepKind:
-                    dpg.add_text(kind.value, color=STEP_COLORS[kind])
-            dpg.add_separator()
-            with dpg.node_editor(
-                tag="dag_editor",
-                callback=self._on_link_created,
-                delink_callback=self._on_link_deleted,
-                minimap=True,
-                minimap_location=dpg.mvNodeMiniMap_Location_BottomRight,
-            ):
-                pass
-
-    def _set_status(self, msg: str) -> None:
-        if dpg.does_item_exist("status_bar"):
-            dpg.set_value("status_bar", _oneline(msg))
-
-    def _auto_refresh_tick(self) -> None:
-        now = time.monotonic()
-        if self._force_refresh:
-            self._force_refresh = False
-            self._last_check = now
-            self._refresh()
-            return
-        if now - self._last_check < AUTO_REFRESH_SECONDS:
-            return
-        self._last_check = now
-        sig = _dir_signature(self._runs_dir)
-        if sig != self._last_signature:
-            self._refresh()
-
-    def _refresh(self) -> None:
-        self._runs, self._errors, self._last_signature, self._run_paths = load_runs(
-            self._runs_dir
-        )
-        selected_id = self._selected_run.id if self._selected_run else None
-        if selected_id:
-            match = next((r for r in self._runs if r.id == selected_id), None)
-            self._selected_run = match
-            if match is None:
-                self._selected_step = None
-                dpg.set_value("detail_text", "Select a run")
-                dpg.set_value("step_text", "Select a step in the DAG")
-                self._clear_dag()
-            else:
-                self._show_run_detail(match)
-                self._rebuild_dag(match, highlight=self._current_matches(match))
-                if self._selected_step:
-                    step = match.get_step(self._selected_step.id)
-                    self._selected_step = step
-                    if step:
-                        self._show_step_detail(step)
-                    else:
-                        dpg.set_value("step_text", "Step gone")
-        self._render_run_table()
-        self._render_errors()
-        self._update_action_state()
-        visible_count = len(self._filtered_runs())
-        filter_note = f", {visible_count} shown" if self._run_filter else ""
-        if dpg.does_item_exist("top_runs_dir"):
-            dir_str = _sanitize(str(self._runs_dir))
-            if len(dir_str) > 64:
-                dir_str = "..." + dir_str[-61:]
-            dpg.set_value("top_runs_dir", dir_str)
-        if dpg.does_item_exist("status_meta"):
-            dpg.set_value("status_meta", time.strftime("%H:%M:%S"))
-        self._set_status(
-            f"{self._runs_dir} - {len(self._runs)} run(s){filter_note}"
-            + (f", {len(self._errors)} error(s)" if self._errors else "")
-        )
-
-    def _render_run_table(self) -> None:
-        if not dpg.does_item_exist("run_table"):
-            return
-        for child in dpg.get_item_children("run_table", slot=1) or []:
-            dpg.delete_item(child)
-        visible_runs = self._filtered_runs()
-        id_width = _px(130)
-        if dpg.does_item_exist("panel_runs"):
-            panel_w = dpg.get_item_configuration("panel_runs")["width"]
-            id_width = max(_px(96), min(_px(170), panel_w - _px(162)))
-        # Budget the real cell: frame padding plus the 2-char selection prefix.
-        id_chars = max(9, (id_width - _px(20)) // _px(8) - 2)
-        for run in visible_runs:
-            with dpg.table_row(parent="run_table"):
-                color = RUN_STATUS_COLORS.get(run.status, [255, 255, 255])
-                selected = self._selected_run is not None and self._selected_run.id == run.id
-                short = _elide_middle(run.id, id_chars)
-                label = f"> {short}" if selected else short
-                dpg.add_button(
-                    label=label,
-                    callback=self._on_run_selected,
-                    user_data=run.id,
-                    width=id_width,
-                )
-                dpg.add_text(run.status.value, color=color)
-                dpg.add_text(_cost_text(run))
-        dpg.set_value("run_summary", _run_list_summary(self._runs, visible_runs, self._run_filter))
-        if not visible_runs:
-            with dpg.table_row(parent="run_table"):
-                msg = "No runs match filter" if self._run_filter else "No .tine runs found"
-                dpg.add_text(msg, color=[150, 150, 150])
-                dpg.add_text("")
-                dpg.add_text("")
-
-    def _render_errors(self) -> None:
-        if self._errors:
-            fatal, warnings = _split_load_problems(self._errors)
-            dpg.configure_item(
-                "err_header",
-                show=True,
-                default_value=_load_problem_header(len(fatal), len(warnings)),
-            )
-            # Files that did not load at all come first: a warning about a run
-            # the user can still open must not push a missing run out of view.
-            ordered = fatal + warnings
-            shown = [_oneline(_truncate(e, 160)) for e in ordered[:10]]
-            if len(ordered) > len(shown):
-                shown.append(f"...and {len(ordered) - len(shown)} more")
-            dpg.set_value("err_text", _sanitize("\n".join(shown)))
-        else:
-            dpg.configure_item("err_header", show=False)
-            dpg.set_value("err_text", "")
-
-    def _on_run_selected(self, sender, app_data, user_data) -> None:
-        self._select_run(user_data)
-
-    def _select_run(self, run_id: str) -> None:
-        run = next((r for r in self._runs if r.id == run_id), None)
-        if run is None:
-            return
-        self._selected_run = run
-        self._selected_step = None
-        self._show_run_detail(self._selected_run)
-        dpg.set_value("step_text", "Select a step in the DAG")
-        self._rebuild_dag(self._selected_run, highlight=self._current_matches(run))
-        self._render_run_table()
-        self._update_action_state()
-
-    def _on_filter_change(self, sender, app_data) -> None:
-        self._run_filter = (app_data or "").strip().lower()
-        self._persist_preferences()
-        self._render_run_table()
-        self._update_action_state()
-        shown = len(self._filtered_runs())
-        problem = _query_error(self._run_filter)
-        if problem:
-            self._set_status(f"{problem} - falling back to a plain text search")
-        else:
-            self._set_status(f"{self._runs_dir} - {shown}/{len(self._runs)} run(s) shown")
-
-    def _current_matches(self, run: Run) -> set[str]:
-        if not self._step_filter:
-            return set()
-        return set(_matching_steps(run, self._step_filter))
-
-    def _on_step_filter_change(self, sender, app_data) -> None:
-        self._step_filter = (app_data or "").strip().lower()
-        run = self._selected_run
-        matches = _matching_steps(run, self._step_filter) if run else []
-        if run and dpg.does_item_exist("dag_summary"):
-            dpg.set_value(
-                "dag_summary",
-                _dag_summary(run, self._step_filter, matches),
-            )
-        if run:
-            self._rebuild_dag(run, highlight=set(matches))
-        if self._step_filter:
-            if run:
-                self._set_status(_highlight_summary(run, set(matches)))
-            else:
-                self._set_status("Select a run to highlight its steps")
-
-    def _clear_step_filter(self) -> None:
-        self._step_filter = ""
-        if dpg.does_item_exist("step_filter"):
-            dpg.set_value("step_filter", "")
-        if self._selected_run:
-            if dpg.does_item_exist("dag_summary"):
-                dpg.set_value("dag_summary", _dag_summary(self._selected_run))
-            self._rebuild_dag(self._selected_run)
-
-    def _filtered_runs(self) -> list[Run]:
-        return [run for run in self._runs if _run_matches_filter(run, self._run_filter)]
-
-    def _update_action_state(self) -> None:
-        run = self._selected_run
-        can_pause = bool(run and run.status == RunStatus.running)
-        can_resume = bool(run and run.status == RunStatus.paused)
-        can_fork = bool(run and self._selected_step)
-        can_diff = bool(run and any(r.id != run.id for r in self._runs))
-        for tag, enabled in (
-            ("menu_pause", can_pause),
-            ("btn_pause", can_pause),
-            ("btn_pause_wrap", can_pause),
-            ("menu_resume", can_resume),
-            ("btn_resume", can_resume),
-            ("btn_resume_wrap", can_resume),
-            ("menu_fork", can_fork),
-            ("menu_fork_branch", can_fork),
-            ("btn_fork", can_fork),
-            ("btn_fork_wrap", can_fork),
-            ("menu_transcript", run is not None),
-            ("menu_export_otel", run is not None and to_otel_genai_document is not None),
-            ("menu_diff", can_diff),
-            ("btn_diff", can_diff),
-            ("btn_diff_wrap", can_diff),
-            ("btn_copy_run", run is not None),
-            ("btn_copy_run_wrap", run is not None),
-            ("btn_copy_step", self._selected_step is not None),
-            ("btn_copy_step_wrap", self._selected_step is not None),
-        ):
-            if dpg.does_item_exist(tag):
-                dpg.configure_item(tag, enabled=enabled)
-
-    def _show_run_detail(self, run: Run) -> None:
-        kind_counts: dict[str, int] = {}
-        for step in run.steps:
-            kind_counts[step.kind.value] = kind_counts.get(step.kind.value, 0) + 1
-        stats = _graph_stats(run)
-        run_id = str(run.id)
-        lines = [
-            f"Run: {run_id}" if len(run_id) <= 32 else f"Run: {run_id[:12]}...",
-            f"Model: {_oneline(run.model_info) or '(none)'}",
-            f"Status: {run.status.value}",
-            f"Created: {_format_timestamp(run.created_at)}",
-            _format_version_line(run),
-            f"Steps: {len(run.steps)}",
-            f"Step kinds: {_format_counts(kind_counts)}",
-            (
-                "Graph: "
-                f"{stats['roots']} root(s), {stats['links']} link(s), "
-                f"{stats['branches']} branch point(s), depth {stats['max_depth']}"
-            ),
-            f"Cost: {_cost_text(run)}",
-            f"Tokens: {run.total_tokens}",
-            f"Duration: {run.total_duration:.1f}s",
-        ]
-        pricing_line = _pricing_line(run)
-        if pricing_line:
-            lines.append(pricing_line)
-        lines.extend(_cost_attribution_lines(run))
-        budget_line = _budget_line(run)
-        if budget_line:
-            lines.append(budget_line)
-        breach = _budget_breach_line(run)
-        if breach:
-            lines.append(breach)
-        if run.tags:
-            lines.append(f"Tags: {', '.join(_oneline(t) for t in sorted(run.tags))}")
-        if run.refs:
-            refs = ", ".join(
-                f"{_oneline(name)} -> {_oneline(tip)}" for name, tip in run.refs.items()
-            )
-            lines.append(f"Refs: {refs}")
-        lines.extend(self._trust_lines(run))
-        if len(run_id) > 32:
-            lines.append(f"Full id: {run_id}")
-        lines.extend(["", "Prompt:", *_indent_block(_truncate(run.user_prompt or "", 700))])
-        if run.system_prompt:
-            lines.extend(
-                ["", "System prompt:", *_indent_block(_truncate(run.system_prompt, 400))]
-            )
-        lineage = _fork_lineage_lines(run)
-        if lineage:
-            lines.append("")
-            lines.extend(lineage)
-        dpg.set_value("detail_text", _sanitize("\n".join(lines)))
-
-    def _trust_lines(self, run: Run) -> list[str]:
-        """Integrity digest and signature state for the run's file on disk."""
-        path = self._run_paths.get(run.id)
-        if path is None:
-            return ["Integrity: (not on disk yet)"]
-        try:
-            stat_result = path.stat()
-        except OSError as e:
-            return [f"Integrity: unreadable ({e})"]
-
-        integrity = _verify_integrity_cached(path, stat_result)
-        reason = str(integrity["reason"])
-        if integrity["ok"]:
-            lines = ["Integrity: ok" + (" (draft)" if integrity.get("draft") else "")]
-        elif reason.startswith("check failed"):
-            lines = [f"Integrity: {reason}"]
-        else:
-            lines = [f"Integrity: FAILED - {reason}"]
-
-        lines.append(
-            _signature_line(_verify_cached(path, stat_result, "signature", Run.verify_signature))
-        )
-        return lines
-
-    def _show_step_detail(self, step: Step) -> None:
-        parents = ", ".join(_oneline(p) for p in step.parent_ids) if step.parent_ids else "(root)"
-        lines = [
-            f"ID: {_oneline(step.id)}",
-            f"Kind: {step.kind.value}",
-            f"Parents: {parents}",
-            f"Model: {_oneline(step.model_info) or '(none)'}",
-            f"Duration: {step.duration:.3f}s",
-            f"Cost: ${step.cost:.6f}",
-        ]
-        if step.timestamp:
-            lines.insert(4, f"Time: {_format_timestamp(step.timestamp)}")
-        if step.usage:
-            lines.append("")
-            lines.append("Usage:")
-            lines.extend(_mapping_lines(step.usage))
-        if step.billing:
-            lines.append("")
-            lines.append("Billing:")
-            lines.extend(_mapping_lines(step.billing))
-        if step.tool_info:
-            lines.append("")
-            lines.append("Tool:")
-            lines.extend(_mapping_lines(step.tool_info))
-        lines.append("")
-        lines.append("Inputs:")
-        lines.extend(_mapping_lines(step.inputs))
-        lines.append("")
-        lines.append("Outputs:")
-        lines.extend(_mapping_lines(step.outputs))
-        if step.error:
-            lines.append("")
-            lines.append("Error:")
-            lines.extend(_mapping_lines(step.error))
-        dpg.set_value("step_text", _sanitize("\n".join(lines)))
-
-    def _clear_dag(self) -> None:
-        # Links (slot 0) must go before nodes (slot 1): deleting a node that a
-        # live link still references segfaults Dear PyGui's native layer.
-        for link in dpg.get_item_children("dag_editor", slot=0) or []:
-            dpg.delete_item(link)
-        for child in dpg.get_item_children("dag_editor", slot=1) or []:
-            dpg.delete_item(child)
-        if dpg.does_item_exist("dag_summary"):
-            dpg.set_value("dag_summary", "Select a run to inspect its opentine step graph.")
-
-    def _dag_avail_width(self) -> int:
-        if dpg.does_item_exist("panel_dag"):
-            w = dpg.get_item_rect_size("panel_dag")[0]
-            if w > _px(100):
-                return int(w) - _px(40)
-        vw = dpg.get_viewport_client_width()
-        left = center = 0
-        if dpg.does_item_exist("panel_runs"):
-            left = dpg.get_item_configuration("panel_runs")["width"]
-        if dpg.does_item_exist("panel_detail"):
-            center = dpg.get_item_configuration("panel_detail")["width"]
-        return max(_px(260), vw - (left or _px(340)) - (center or _px(480)) - _px(80))
-
-    def _rebuild_dag(self, run: Run, highlight: set[str] | None = None) -> None:
-        highlight = highlight or set()
-        self._clear_dag()
-        dpg.set_value(
-            "dag_summary",
-            _dag_summary(run, self._step_filter, highlight)
-            if self._step_filter
-            else _dag_summary(run),
-        )
-        in_attr: dict[str, int] = {}
-        out_attr: dict[str, int] = {}
-        depth = _step_depths(run)
-        # Wrap depth columns into horizontal bands sized to the visible panel,
-        # so whole graphs stay on screen instead of running off to the right.
-        rows_at_depth: dict[int, int] = {}
-        for step in run.steps:
-            rows_at_depth[depth[step.id]] = rows_at_depth.get(depth[step.id], 0) + 1
-        max_depth = max(rows_at_depth, default=0)
-        pitch_x, pitch_y = _px(NODE_PITCH_X), _px(NODE_PITCH_Y)
-        cols = max(1, self._dag_avail_width() // pitch_x)
-        # Bucket depths by band once. Rescanning every depth for every band is
-        # quadratic, and a legal run can hold ~15,900 steps within MAX_TINE_BYTES
-        # — enough to freeze the render thread for over ten seconds.
-        depths_by_band: dict[int, list[int]] = {}
-        for d in rows_at_depth:
-            depths_by_band.setdefault(d // cols, []).append(d)
-        band_y: dict[int, int] = {}
-        y_cursor = _px(20)
-        for band in range(max_depth // cols + 1):
-            band_y[band] = y_cursor
-            band_rows = max(
-                (rows_at_depth[d] for d in depths_by_band.get(band, ())), default=1
-            )
-            y_cursor += band_rows * pitch_y + _px(30)
-        col_fill: dict[int, int] = {}
-        for step in run.steps:
-            d = depth[step.id]
-            row = col_fill.get(d, 0)
-            col_fill[d] = row + 1
-            band, cx = divmod(d, cols)
-            pos = [_px(20) + cx * pitch_x, band_y[band] + row * pitch_y]
-            color = STEP_COLORS.get(step.kind, [255, 255, 255])
-            is_match = step.id in highlight
-            label = _node_label(step, highlighted=is_match)
-            node_id = dpg.add_node(
-                parent="dag_editor",
-                label=label,
-                pos=pos,
-                user_data=step.id,
-            )
-            dpg.bind_item_theme(node_id, _node_theme(color, highlighted=is_match))
-
-            in_id = dpg.add_node_attribute(
-                parent=node_id, attribute_type=dpg.mvNode_Attr_Input
-            )
-            dpg.add_text("in", parent=in_id)
-            in_attr[step.id] = in_id
-
-            static_id = dpg.add_node_attribute(
-                parent=node_id, attribute_type=dpg.mvNode_Attr_Static
-            )
-            dpg.add_text(f"{step.duration:.2f}s  ${step.cost:.4f}", parent=static_id)
-            dpg.add_button(
-                label="inspect",
-                parent=static_id,
-                user_data=step.id,
-                callback=self._on_step_open,
-                width=_px(80),
-            )
-
-            out_id = dpg.add_node_attribute(
-                parent=node_id, attribute_type=dpg.mvNode_Attr_Output
-            )
-            dpg.add_text("out", parent=out_id)
-            out_attr[step.id] = out_id
-
-        for step in run.steps:
-            if step.id not in in_attr:
-                continue
-            for parent_id in step.parent_ids:
-                if parent_id in out_attr:
-                    dpg.add_node_link(
-                        out_attr[parent_id], in_attr[step.id], parent="dag_editor"
-                    )
-
-    def _on_step_open(self, sender, app_data, user_data) -> None:
-        if not self._selected_run:
-            return
-        step = self._selected_run.get_step(user_data)
-        if step:
-            self._selected_step = step
-            self._show_step_detail(step)
-            self._update_action_state()
-
-    def _on_link_created(self, sender, app_data) -> None:
-        # read-only DAG: discard user-created links
-        pass
-
-    def _on_link_deleted(self, sender, app_data) -> None:
-        pass
-
-    def _bind_ui_font(self) -> bool:
-        """Load a real font so non-ASCII agent output is legible. False if none."""
-        path = _find_ui_font()
-        if path is None:
-            return False
-        try:
-            with dpg.font_registry():
-                with dpg.font(str(path), _px(FONT_SIZE)) as font:
-                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
-                    # Latin-1 accents plus the punctuation and symbols that
-                    # actually show up in model output (dashes, arrows, checks).
-                    for first, last in EXTRA_GLYPH_RANGES:
-                        dpg.add_font_range(first, last)
-                    if os.environ.get("OPENTINE_GUI_FONT"):
-                        # The user pointed us at a specific face; assume they did
-                        # so for a script the default cannot draw. These hints
-                        # are large, so they are not loaded by default.
-                        for hint in (
-                            dpg.mvFontRangeHint_Cyrillic,
-                            dpg.mvFontRangeHint_Japanese,
-                            dpg.mvFontRangeHint_Chinese_Simplified_Common,
-                            dpg.mvFontRangeHint_Korean,
-                        ):
-                            dpg.add_font_range_hint(hint)
-            dpg.bind_font(font)
-        except Exception:
-            return False  # a broken/unsupported face must not stop the console
-        return True
-
-    def _build_diff_dialog(self) -> None:
-        with dpg.window(
-            label="Compare runs",
-            modal=True,
-            show=False,
-            tag="diff_dialog",
-            width=_px(760),
-            height=_px(560),
-            no_resize=False,
-        ):
-            dpg.add_text("", tag="diff_subject", color=TEXT_SECONDARY)
-            with dpg.group(horizontal=True):
-                dpg.add_listbox(
-                    [],
-                    tag="diff_candidates",
-                    width=_px(300),
-                    num_items=6,
-                    callback=self._compare_runs,
-                )
-                with dpg.group():
-                    dpg.add_button(label="Compare", callback=self._compare_runs, width=_px(110))
-                    dpg.add_button(
-                        label="Close",
-                        width=_px(110),
-                        callback=lambda: dpg.configure_item("diff_dialog", show=False),
-                    )
-            dpg.add_separator()
-            with dpg.child_window(tag="diff_scroll", border=False):
-                dpg.add_text(
-                    "Pick a run to compare against.",
-                    tag="diff_text",
-                    wrap=_px(720),
-                    color=TEXT_SECONDARY,
-                )
-
-    def _copy_to_clipboard(self, value: str, label: str) -> None:
-        try:
-            dpg.set_clipboard_text(value)
-        except Exception as e:
-            self._set_status(f"Could not copy {label}: {e}")
-            return
-        self._set_status(f"Copied {label}: {_truncate(value, 60)}")
-
-    def _copy_run_id(self) -> None:
-        if self._selected_run is None:
-            self._set_status("Select a run first")
-            return
-        self._copy_to_clipboard(str(self._selected_run.id), "run id")
-
-    def _copy_step_id(self) -> None:
-        if self._selected_step is None:
-            self._set_status("Select a step first")
-            return
-        self._copy_to_clipboard(str(self._selected_step.id), "step id")
-
-    def _open_diff_dialog(self) -> None:
-        run = self._selected_run
-        if not run:
-            self._set_status("Select a run to compare")
-            return
-        others = [str(r.id) for r in self._runs if r.id != run.id]
-        if not others:
-            self._set_status("Need a second run in this directory to compare")
-            return
-        # A fork's origin is the comparison the user almost always wants.
-        origin = str(run.metadata.get("forked_from") or "")
-        default = origin if origin in others else others[0]
-        dpg.configure_item("diff_candidates", items=others, default_value=default)
-        dpg.set_value("diff_candidates", default)
-        dpg.set_value("diff_subject", _sanitize(f"A: {run.id}   - compare with:"))
-        dpg.set_value("diff_text", "Pick a run and press Compare.")
-        vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
-        dpg.configure_item(
-            "diff_dialog",
-            show=True,
-            pos=[max(0, (vw - _px(760)) // 2), max(0, (vh - _px(560)) // 2)],
-        )
-
-    def _compare_runs(self, *_args) -> None:
-        run = self._selected_run
-        if not run:
-            return
-        other_id = dpg.get_value("diff_candidates")
-        other = next((r for r in self._runs if str(r.id) == str(other_id)), None)
-        if other is None:
-            dpg.set_value("diff_text", f"Run {other_id} is no longer loaded.")
-            return
-        try:
-            body = _format_run_diff(run, other)
-        except Exception as e:
-            body = f"Could not diff these runs: {e}"
-        dpg.set_value("diff_text", _sanitize(body))
-
-    def _open_dir_picker(self) -> None:
-        dpg.set_value("dir_picker_input", _sanitize(str(self._runs_dir)))
-        vw = dpg.get_viewport_client_width()
-        vh = dpg.get_viewport_client_height()
-        dpg.configure_item(
-            "dir_picker",
-            show=True,
-            pos=[max(0, (vw - _px(560)) // 2), max(0, (vh - _px(110)) // 2)],
-        )
-
-    def _apply_dir(self) -> None:
-        new_dir = Path(dpg.get_value("dir_picker_input")).expanduser()
-        self._runs_dir = new_dir
-        self._run_filter = ""
-        self._step_filter = ""
-        self._selected_run = None
-        self._selected_step = None
-        if dpg.does_item_exist("run_filter"):
-            dpg.set_value("run_filter", "")
-        if dpg.does_item_exist("step_filter"):
-            dpg.set_value("step_filter", "")
-        self._persist_preferences()
-        dpg.set_value("detail_text", "Select a run")
-        dpg.set_value("step_text", "Select a step in the DAG")
-        self._clear_dag()
-        dpg.configure_item("dir_picker", show=False)
-        self._refresh()
-
-    def _run_path(self, run: Run) -> Path:
-        """The file this run was loaded from; falls back to <id>.tine for new runs."""
-        path = self._run_paths.get(run.id)
-        if path is not None:
-            return path
-        return _safe_run_path(self._runs_dir, run.id)
-
-    def _pause_selected(self) -> None:
-        run = self._selected_run
-        if not run or run.status != RunStatus.running:
-            self._set_status("Select a running run to pause")
-            return
-        try:
-            path = self._run_path(run)
-            if path.exists():
-                # Reload before writing: the cached snapshot can be up to one
-                # refresh interval stale, and pausing from it would truncate
-                # steps a still-running agent has since written.
-                fresh = Run.load(path)
-                if fresh.status != RunStatus.running:
-                    self._refresh()
-                    self._set_status(f"{run.id} is no longer running ({fresh.status.value})")
-                    return
-            else:
-                self._runs_dir.mkdir(parents=True, exist_ok=True)
-                fresh = run
-            fresh.pause(path)
-        except Exception as e:  # Run.load raises more than OSError on bad files
-            self._set_status(f"Cannot pause: {e}")
-            return
-        self._refresh()
-        self._set_status(f"Paused {run.id}")
-
-    def _resume_selected(self) -> None:
-        run = self._selected_run
-        if not run or run.status != RunStatus.paused:
-            self._set_status("Select a paused run to resume")
-            return
-        try:
-            path = self._run_path(run)
-            # Same freshness rule as pause: never flip a status another process
-            # already moved past paused (e.g. completed) since the last refresh.
-            fresh = Run.load(path)
-            if fresh.status != RunStatus.paused:
-                self._refresh()
-                self._set_status(f"{run.id} is no longer paused ({fresh.status.value})")
-                return
-            resumed = Run.resume(path)
-            resumed.save(path)
-        except Exception as e:
-            self._set_status(f"Cannot resume: {e}")
-            return
-        self._selected_run = resumed
-        self._refresh()
-        self._set_status(f"Resumed {resumed.id}")
-
-    def _fork_selected(self) -> None:
-        """One-click fork onto main — the fast path."""
-        self._do_fork()
-
-    def _do_fork(
-        self, *, branch: str = "main", reason: str = "", reproducible: bool = False
-    ) -> None:
-        run = self._selected_run
-        step = self._selected_step
-        if not run or not step:
-            self._set_status("Select a step to fork from")
-            return
-        reason = reason.strip()
-        if len(reason) > MAX_FORK_REASON:
-            self._set_status(f"Fork reason must be at most {MAX_FORK_REASON} characters")
-            return
-        try:
-            source = self._run_path(run)
-            fresh = Run.load(source) if source.exists() else run
-            if fresh.get_step(step.id) is None:
-                self._refresh()
-                self._set_status(f"Step {step.id} no longer exists in {run.id}")
-                return
-            # Mirror opentine's own MCP fork: the reason enters the fork identity
-            # via intent, and is also stored as plaintext. Note the plaintext is
-            # NOT signed (opentine omits fork_reason from _SIGNED_METADATA_KEYS),
-            # which is why the inspector re-derives the intent digest to decide
-            # whether the shown reason is attested.
-            new_run = fresh.fork(
-                step.id,
-                branch=branch or "main",
-                intent={"reason": reason} if reason else None,
-                nonce="" if reproducible else None,
-            )
-            if reason:
-                new_run.metadata["fork_reason"] = reason
-            out_path = _safe_run_path(self._runs_dir, new_run.id)
-            if out_path.exists():
-                # Refuse rather than clobber, the way opentine's own CLI
-                # (_require_output_slot) and MCP fork do. A reproducible fork
-                # (nonce="") derives the same id every time, so a second one
-                # would otherwise overwrite the first — and any work done inside
-                # it — with no error. Unconditional: it also catches a
-                # hand-placed file colliding with a unique-act id.
-                self._set_status(
-                    f"A run already exists at {out_path.name}; uncheck "
-                    "'Reproducible id' or change the branch or reason"
-                )
-                return
-            self._runs_dir.mkdir(parents=True, exist_ok=True)
-            new_run.save(out_path)
-        except Exception as e:
-            self._set_status(f"Cannot fork: {e}")
-            return
-        self._selected_run = new_run
-        self._selected_step = None
-        if dpg.does_item_exist("step_text"):
-            dpg.set_value("step_text", "Select a step in the DAG")
-        if dpg.does_item_exist("fork_dialog"):
-            dpg.configure_item("fork_dialog", show=False)
-        self._refresh()
-        where = f" on {branch}" if branch and branch != "main" else ""
-        self._set_status(f"Forked {run.id}@{step.id}{where} -> {new_run.id}")
-
-    def _export_otel(self) -> None:
-        """Write the selected run as an OTLP/JSON GenAI document.
-
-        Read-only: it never touches the artifact, so it cannot disturb an
-        integrity digest or a signature.
-        """
-        run = self._selected_run
-        if run is None:
-            self._set_status("Select a run to export")
-            return
-        if to_otel_genai_document is None:
-            self._set_status("OpenTelemetry export needs opentine 0.5.0 or newer")
-            return
-        try:
-            document = to_otel_genai_document(run)
-            out_path = _export_path(self._runs_dir, run.id)
-            self._runs_dir.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(document, indent=2), encoding="utf-8")
-        except Exception as e:
-            self._set_status(f"Cannot export: {e}")
-            return
-        spans = _span_count(document)
-        self._set_status(f"Exported {spans} span(s) to {out_path.name}")
-
-    def _open_fork_dialog(self) -> None:
-        run, step = self._selected_run, self._selected_step
-        if not run or not step:
-            self._set_status("Select a step to fork from")
-            return
-        dpg.set_value("fork_subject", _sanitize(f"Fork {run.id} at step {step.id}"))
-        dpg.set_value("fork_branch", "main")
-        dpg.set_value("fork_reason", "")
-        dpg.set_value("fork_reproducible", False)
-        vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
-        dpg.configure_item(
-            "fork_dialog",
-            show=True,
-            pos=[
-                max(0, (vw - _px(FORK_DIALOG_SIZE[0])) // 2),
-                max(0, (vh - _px(FORK_DIALOG_SIZE[1])) // 2),
-            ],
-        )
-
-    def _confirm_fork(self) -> None:
-        self._do_fork(
-            branch=(dpg.get_value("fork_branch") or "main").strip(),
-            reason=dpg.get_value("fork_reason") or "",
-            reproducible=bool(dpg.get_value("fork_reproducible")),
-        )
-
-    def _build_transcript_dialog(self) -> None:
-        with dpg.window(
-            label="Transcript", modal=True, show=False, tag="transcript_dialog",
-            width=_px(820), height=_px(620),
-        ):
-            dpg.add_text("", tag="transcript_subject", color=TEXT_SECONDARY)
-            dpg.add_text("", tag="transcript_summary", color=TEXT_MUTED, wrap=_px(780))
-            dpg.add_separator()
-            dpg.add_child_window(tag="transcript_body", border=False)
-            dpg.add_separator()
-            dpg.add_button(
-                label="Close", width=_px(110),
-                callback=lambda: dpg.configure_item("transcript_dialog", show=False),
-            )
-
-    def _open_transcript(self) -> None:
-        run = self._selected_run
-        if run is None:
-            self._set_status("Select a run to read its transcript")
-            return
-        for child in dpg.get_item_children("transcript_body", slot=1) or []:
-            dpg.delete_item(child)
-        dpg.set_value("transcript_subject", _sanitize(f"Transcript of {run.id}"))
-        dpg.set_value("transcript_summary", _transcript_summary(run))
-
-        for index, turn in enumerate(_transcript_turns(run)):
-            with dpg.group(horizontal=True, parent="transcript_body"):
-                dpg.add_text(
-                    _transcript_heading(turn),
-                    color=TRANSCRIPT_ROLE_COLORS.get(turn["role"], TEXT_SECONDARY),
-                )
-                if turn["step_id"]:
-                    # The turn knows which step it produced; jumping there is the
-                    # reason to read a transcript beside a graph rather than alone.
-                    dpg.add_button(
-                        label="show step",
-                        width=_px(84),
-                        user_data=turn["step_id"],
-                        callback=self._on_transcript_step,
-                        tag=f"transcript_step_{index}",
-                    )
-            dpg.add_text(
-                _truncate(turn["content"], 4000) or "(empty)",
-                parent="transcript_body",
-                wrap=_px(760),
-                color=TEXT_SECONDARY,
-            )
-            dpg.add_spacer(height=_px(6), parent="transcript_body")
-
-        vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
-        dpg.configure_item(
-            "transcript_dialog", show=True,
-            pos=[max(0, (vw - _px(820)) // 2), max(0, (vh - _px(620)) // 2)],
-        )
-
-    def _on_transcript_step(self, sender, app_data, user_data) -> None:
-        run = self._selected_run
-        if run is None:
-            return
-        step = run.get_step(user_data)
-        if step is None:
-            self._set_status(f"Step {user_data} is not in this run")
-            return
-        self._selected_step = step
-        self._show_step_detail(step)
-        self._update_action_state()
-        dpg.configure_item("transcript_dialog", show=False)
-        self._set_status(f"Selected step {user_data} from the transcript")
-
-    def _build_fork_dialog(self) -> None:
-        with dpg.window(
-            label="Fork run", modal=True, show=False, tag="fork_dialog",
-            width=_px(FORK_DIALOG_SIZE[0]), height=_px(FORK_DIALOG_SIZE[1]),
-            no_resize=True,
-        ):
-            dpg.add_text("", tag="fork_subject", color=TEXT_SECONDARY)
-            dpg.add_separator()
-            dpg.add_text("Branch", color=TEXT_MUTED)
-            dpg.add_input_text(tag="fork_branch", default_value="main", width=-1)
-            dpg.add_text("Reason (optional)", color=TEXT_MUTED)
-            dpg.add_input_text(
-                tag="fork_reason", width=-1, hint="why this fork exists"
-            )
-            dpg.add_checkbox(
-                label="Reproducible id (no random nonce)", tag="fork_reproducible"
-            )
-            dpg.add_text(
-                "Branch and reason are part of the fork id in opentine 0.4.0.",
-                color=TEXT_MUTED,
-                wrap=_px(520),
-            )
-            with dpg.group(horizontal=True):
-                dpg.add_button(label="Fork", callback=self._confirm_fork, width=_px(110))
-                dpg.add_button(
-                    label="Cancel", width=_px(110),
-                    callback=lambda: dpg.configure_item("fork_dialog", show=False),
-                )
-
-    def _persist_preferences(self) -> None:
-        self._preferences["last_runs_dir"] = str(self._runs_dir)
-        self._preferences["last_filter"] = self._run_filter
-        try:
-            _save_preferences(self._preferences)
-        except OSError as e:
-            self._set_status(f"Preferences not saved: {e}")
-
-
-def _rgba(color: list[int], alpha: int = 255) -> list[int]:
-    return [color[0], color[1], color[2], alpha]
-
-
-def _brighten(color: list[int], amount: int) -> list[int]:
-    return [min(255, c + amount) for c in color[:3]]
+# --------------------------------------------------------------------- themes
 
 
 def _app_theme() -> int:
@@ -1868,10 +221,14 @@ def _app_theme() -> int:
                 (dpg.mvThemeCol_TableHeaderBg, SURFACE_SIDEBAR),
                 (dpg.mvThemeCol_TableBorderStrong, BORDER_STRONG),
                 (dpg.mvThemeCol_TableBorderLight, BORDER_DEFAULT),
+                (dpg.mvThemeCol_TableRowBgAlt, SURFACE_CARD),
                 (dpg.mvThemeCol_Separator, BORDER_DEFAULT),
                 (dpg.mvThemeCol_ScrollbarBg, SURFACE_APP),
                 (dpg.mvThemeCol_ScrollbarGrab, SURFACE_BUTTON),
                 (dpg.mvThemeCol_CheckMark, BRAND),
+                (dpg.mvThemeCol_Tab, SURFACE_PANEL),
+                (dpg.mvThemeCol_TabHovered, STATE_HOVER),
+                (dpg.mvThemeCol_TabActive, STATE_SELECTED),
             ):
                 dpg.add_theme_color(target, _rgba(color), category=dpg.mvThemeCat_Core)
             # Padding, spacing and scrollbars are sizes too: leaving them at 100%
@@ -1881,6 +238,7 @@ def _app_theme() -> int:
                 (dpg.mvStyleVar_FramePadding, 8, 5),
                 (dpg.mvStyleVar_ItemSpacing, 8, 7),
                 (dpg.mvStyleVar_ItemInnerSpacing, 6, 5),
+                (dpg.mvStyleVar_CellPadding, 6, 4),
             ):
                 dpg.add_theme_style(target, _px(x), _px(y), category=dpg.mvThemeCat_Core)
             for target, value, scaled in (
@@ -1912,27 +270,21 @@ def _button_theme(kind: str = "ghost") -> int:
     colors = {
         "ghost": (SURFACE_BUTTON, STATE_HOVER, STATE_ACTIVE, TEXT_PRIMARY),
         "primary": (BRAND_DIM, BRAND, STATE_ACTIVE, TEXT_PRIMARY),
+        "danger": (SURFACE_BUTTON, ACCENT_RED, STATE_ACTIVE, ACCENT_RED),
     }.get(kind, (SURFACE_BUTTON, STATE_HOVER, STATE_ACTIVE, TEXT_PRIMARY))
 
     with dpg.theme() as theme:
         with dpg.theme_component(dpg.mvButton):
-            dpg.add_theme_color(
-                dpg.mvThemeCol_Button,
-                _rgba(colors[0]),
-                category=dpg.mvThemeCat_Core,
-            )
-            dpg.add_theme_color(
-                dpg.mvThemeCol_ButtonHovered, _rgba(colors[1]), category=dpg.mvThemeCat_Core
-            )
-            dpg.add_theme_color(
-                dpg.mvThemeCol_ButtonActive, _rgba(colors[2]), category=dpg.mvThemeCat_Core
-            )
-            dpg.add_theme_color(dpg.mvThemeCol_Text, _rgba(colors[3]), category=dpg.mvThemeCat_Core)
+            for target, color in (
+                (dpg.mvThemeCol_Button, colors[0]),
+                (dpg.mvThemeCol_ButtonHovered, colors[1]),
+                (dpg.mvThemeCol_ButtonActive, colors[2]),
+                (dpg.mvThemeCol_Text, colors[3]),
+            ):
+                dpg.add_theme_color(target, _rgba(color), category=dpg.mvThemeCat_Core)
             # Scaled like _app_theme's: an item theme overrides the global one,
             # so leaving these raw would un-scale every action button at HiDPI.
-            dpg.add_theme_style(
-                dpg.mvStyleVar_FrameRounding, _px(6), category=dpg.mvThemeCat_Core
-            )
+            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, _px(6), category=dpg.mvThemeCat_Core)
             dpg.add_theme_style(
                 dpg.mvStyleVar_FramePadding, _px(8), _px(4), category=dpg.mvThemeCat_Core
             )
@@ -1943,33 +295,6 @@ def _button_theme(kind: str = "ghost") -> int:
             dpg.add_theme_color(dpg.mvThemeCol_Text, _rgba(TEXT_FAINT))
     _BUTTON_THEMES[kind] = theme
     return theme
-
-
-def _panel_header(title: str, subtitle: str, subtitle_tag: str | None = None) -> None:
-    dpg.add_text(title, color=TEXT_PRIMARY)
-    if subtitle_tag:
-        dpg.add_text(subtitle, color=TEXT_MUTED, tag=subtitle_tag)
-    else:
-        dpg.add_text(subtitle, color=TEXT_MUTED)
-
-
-def _action_button(label: str, callback, tag: str, width: int = 96) -> int | str:
-    # DPG 2.x buttons ignore enabled= for click-blocking; a disabled wrapping
-    # group both swallows clicks and applies the disabled styling.
-    with dpg.group(tag=f"{tag}_wrap"):
-        # width=0 lets Dear PyGui size the button to its label.
-        item = dpg.add_button(
-            label=label, callback=callback, tag=tag, width=_px(width) if width else 0
-        )
-    dpg.bind_item_theme(item, _button_theme("ghost"))
-    return item
-
-
-_NODE_THEMES: dict[tuple[int, int, int, bool], int] = {}
-
-
-def _dim(color: list[int], factor: float) -> list[int]:
-    return [int(c * factor) for c in color[:3]]
 
 
 def _node_theme(color: list[int], *, highlighted: bool = False) -> int:
@@ -2007,725 +332,2417 @@ def _node_theme(color: list[int], *, highlighted: bool = False) -> int:
     return theme
 
 
-def _node_label(step: Step, *, highlighted: bool = False) -> str:
-    kind = step.kind.value
-    prefix = "* " if highlighted else ""
-    if step.kind == StepKind.tool:
-        name = (step.tool_info or {}).get("name") or step.inputs.get("name", "?")
-        return f"{prefix}{kind}: {_truncate(name, 16)}"
-    if step.kind == StepKind.error:
-        error = step.error or {}
-        text = (
-            error.get("message")
-            or error.get("type")
-            or step.inputs.get("message")
-            or step.outputs.get("error")
-            or step.inputs.get("text")
-            or ""
-        )
-    elif step.kind == StepKind.done:
-        text = (
-            step.outputs.get("answer")
-            or step.outputs.get("text")
-            or step.inputs.get("text")
-            or ""
-        )
-    elif step.kind == StepKind.model:
-        text = step.outputs.get("text") or step.inputs.get("text") or ""
+def _link_theme(kind: str) -> int:
+    """Lineage links and causal links must not read as the same relationship.
+
+    A causal edge says "this step needed that one", not "that one ran before
+    this one". opentine's fork follows both, so both are drawn, in different
+    colours and weights.
+    """
+    if kind in _LINK_THEMES:
+        return _LINK_THEMES[kind]
+    color = TEXT_MUTED if kind == "parent" else ACCENT_PURPLE
+    with dpg.theme() as theme:
+        with dpg.theme_component(dpg.mvNodeLink):
+            dpg.add_theme_color(dpg.mvNodeCol_Link, _rgba(color), category=dpg.mvThemeCat_Nodes)
+            dpg.add_theme_color(
+                dpg.mvNodeCol_LinkHovered,
+                _rgba(_brighten(color, 40)),
+                category=dpg.mvThemeCat_Nodes,
+            )
+            dpg.add_theme_style(
+                dpg.mvNodeStyleVar_LinkThickness,
+                2.0 if kind == "parent" else 1.0,
+                category=dpg.mvThemeCat_Nodes,
+            )
+    _LINK_THEMES[kind] = theme
+    return theme
+
+
+def _panel_header(title: str, subtitle: str, subtitle_tag: str | None = None) -> None:
+    dpg.add_text(title, color=TEXT_PRIMARY)
+    if subtitle_tag:
+        dpg.add_text(subtitle, color=TEXT_MUTED, tag=subtitle_tag)
     else:
-        text = step.inputs.get("text") or ""
-    if text:
-        return f"{prefix}{kind}: {_truncate(text, 18)}"
-    return f"{prefix}{kind}: {_sanitize(step.short_id)}"
+        dpg.add_text(subtitle, color=TEXT_MUTED)
 
 
-def _step_depths(run: Run) -> dict[str, int]:
-    """Longest-path depth per step, iterative so 1000+-step chains don't overflow.
+def _action_button(label: str, callback, tag: str, width: int = 96, kind: str = "ghost"):
+    # DPG 2.x buttons ignore enabled= for click-blocking; a disabled wrapping
+    # group both swallows clicks and applies the disabled styling.
+    with dpg.group(tag=f"{tag}_wrap"):
+        # width=0 lets Dear PyGui size the button to its label.
+        item = dpg.add_button(
+            label=label, callback=callback, tag=tag, width=_px(width) if width else 0
+        )
+    dpg.bind_item_theme(item, _button_theme(kind))
+    return item
 
-    Cycle back-edges contribute nothing (steps on a pure cycle get depth 0).
+
+def _hint(parent: int | str, text: str) -> None:
+    """A hover explanation. Used where a control's own label cannot say enough."""
+    with dpg.tooltip(parent):
+        dpg.add_text(text, wrap=_px(360))
+
+
+# ------------------------------------------------------------ background load
+
+
+@dataclass
+class _Message:
+    level: str
+    text: str
+    at: float
+
+
+class _Loader:
+    """Scans the source on a worker thread and hands back finished snapshots.
+
+    Reading a directory means parsing every artifact and hashing every file, and
+    a v3 repository read is dearer still. Doing that inside the frame loop made
+    the whole console stall on every refresh tick; doing it here keeps the UI at
+    frame rate. The worker never touches Dear PyGui: it only puts data on a
+    queue that the render thread drains.
     """
-    by_id = {step.id: step for step in run.steps}
 
-    def valid_parents(sid: str) -> list[str]:
-        return [p for p in by_id[sid].parent_ids if p in by_id and p != sid]
+    def __init__(self, source, interval: float = AUTO_REFRESH_SECONDS) -> None:
+        self.source = source
+        self.interval = interval
+        self.results: queue.Queue = queue.Queue()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._force = False
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._last_signature: tuple | None = None
+        self.auto = True
 
-    memo: dict[str, int] = {}
-    for step in run.steps:
-        if step.id in memo:
-            continue
-        # frame: [step_id, parents, next_parent_index, best_parent_depth]
-        stack: list[list] = [[step.id, valid_parents(step.id), 0, -1]]
-        on_stack = {step.id}
-        while stack:
-            frame = stack[-1]
-            sid, parents, idx, best = frame
-            if idx < len(parents):
-                frame[2] += 1
-                parent = parents[idx]
-                if parent in memo:
-                    frame[3] = max(best, memo[parent])
-                elif parent not in on_stack:
-                    stack.append([parent, valid_parents(parent), 0, -1])
-                    on_stack.add(parent)
-            else:
-                memo[sid] = best + 1 if best >= 0 else 0
-                on_stack.discard(sid)
-                stack.pop()
-                if stack:
-                    stack[-1][3] = max(stack[-1][3], memo[sid])
-    return memo
-
-
-def _graph_stats(run: Run) -> dict[str, int]:
-    step_ids = {step.id for step in run.steps}
-    child_counts: dict[str, int] = {}
-    links = 0
-    roots = 0
-    for step in run.steps:
-        parents = [p for p in step.parent_ids if p in step_ids]
-        if parents:
-            for parent_id in parents:
-                links += 1
-                child_counts[parent_id] = child_counts.get(parent_id, 0) + 1
-        else:
-            roots += 1
-    depths = _step_depths(run)
-    return {
-        "roots": roots,
-        "links": links,
-        "branches": sum(1 for count in child_counts.values() if count > 1),
-        "max_depth": max(depths.values(), default=0),
-    }
-
-
-def _run_list_summary(runs: list[Run], visible_runs: list[Run], query: str) -> str:
-    if not runs:
-        return "No .tine runs loaded. Change directory or wait for agents to write runs."
-    status_counts: dict[str, int] = {}
-    for run in visible_runs:
-        status_counts[run.status.value] = status_counts.get(run.status.value, 0) + 1
-    total_cost = sum(run.total_cost for run in visible_runs)
-    shown = f"{len(visible_runs)}/{len(runs)} shown" if query else f"{len(runs)} run(s)"
-    counts = _format_counts(status_counts)
-    partial = sum(1 for run in visible_runs if _pricing_incompleteness(run)[0])
-    cost = f"{'>=' if partial else ''}${total_cost:.4f}"
-    note = f" ({partial} run(s) partially priced)" if partial else ""
-    return f"{shown} - {counts} - visible cost {cost}{note}"
-
-
-def _dag_summary(run: Run, query: str = "", matches: set[str] | None = None) -> str:
-    stats = _graph_stats(run)
-    summary = (
-        f"{len(run.steps)} step(s), {stats['links']} link(s), "
-        f"{stats['branches']} branch point(s), depth {stats['max_depth']}"
-    )
-    if not query:
-        return summary
-    matched = matches or set(_matching_steps(run, query))
-    return f"{summary} - {len(matched)}/{len(run.steps)} match query '{query}'"
-
-
-def _matching_steps(run: Run | None, query: str) -> list[str]:
-    if not run or not query:
-        return []
-    return [step.id for step in run.steps if _step_matches_filter(step, query)]
-
-
-def _highlight_summary(run: Run, matches: set[str]) -> str:
-    if not matches:
-        return "No matching steps"
-    labels = [
-        _truncate(_node_label(step).replace("* ", "", 1), 48)
-        for step in run.steps
-        if step.id in matches
-    ]
-    return "Matches: " + ", ".join(labels[:6])
-
-
-#: The run filter fires on every keystroke on the render thread and otherwise
-#: re-serialises every payload of every run. A loaded Run is not mutated, so its
-#: lowercased search text is built once and dropped with the run itself.
-#: (Step is a frozen dataclass holding lists, so it is unhashable and cannot be
-#: cached this way — but per-step search only ever scans the selected run.)
-_RUN_HAYSTACKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-
-
-def _step_haystack(step: Step) -> list[str]:
-    # Fields like model_info may be None (or non-str) in third-party .tine
-    # files that opentine loads without type-checking; coerce before joining.
-    return [
-        str(step.id),
-        step.kind.value,
-        " ".join(str(p) for p in step.parent_ids),
-        str(step.model_info or ""),
-        _format_value(step.inputs, 500),
-        _format_value(step.outputs, 500),
-        _format_value(step.tool_info, 500),
-        _format_value(step.error, 500),
-    ]
-
-
-def _step_search_text(step: Step) -> str:
-    return "\n".join(_step_haystack(step)).lower()
-
-
-def _run_search_text(run: Run) -> str:
-    # status is the one haystack field the GUI mutates in place (pause/resume),
-    # so it is part of the cache validity check rather than just its content.
-    status = run.status.value
-    try:
-        cached = _RUN_HAYSTACKS.get(run)
-    except TypeError:  # unhashable Run subclass: fall back to recomputing
-        cached = None
-    if cached is not None and cached[0] == status:
-        return cached[1]
-    parts = [
-        str(run.id),
-        run.status.value,
-        str(run.model_info or ""),
-        str(run.user_prompt or ""),
-        str(run.system_prompt or ""),
-        " ".join(str(t) for t in run.tags),
-        _format_value(run.metadata, 2000),
-    ]
-    parts.extend(_step_search_text(step) for step in run.steps)
-    text = "\n".join(parts).lower()
-    try:
-        _RUN_HAYSTACKS[run] = (status, text)
-    except TypeError:  # not weak-referenceable or unhashable
-        pass
-    return text
-
-
-def _step_matches_filter(step: Step, query: str) -> bool:
-    return query in _step_search_text(step)
-
-
-#: Field prefixes opentine's own query grammar understands. The grammar only
-#: engages when one of these is present, so a plain multi-word search keeps
-#: behaving as the substring match users already have.
-QUERY_FIELDS = ("status:", "model:", "tag:", "cost:", "after:", "before:", "text:")
-
-
-def _looks_like_a_query(query: str) -> bool:
-    lowered = query.lower()
-    return any(field in lowered for field in QUERY_FIELDS)
-
-
-def _parsed_query(query: str):
-    """opentine's parsed Query for this text, or None to fall back to substring.
-
-    Returns None when the grammar is unavailable (an older opentine), when the
-    text carries no field prefix, or when it does not parse.
-    """
-    if parse_query is None or not _looks_like_a_query(query):
-        return None
-    try:
-        return parse_query(query)
-    except Exception:  # QueryError, or anything a future grammar raises
-        return None
-
-
-def _query_error(query: str) -> str:
-    """Why a field query did not parse, or "" if it parsed or is plain text.
-
-    Without this a typo like `cost:abc` silently matches nothing, which reads
-    as "no such runs" rather than "that is not a valid filter".
-    """
-    if parse_query is None or not query or not _looks_like_a_query(query):
-        return ""
-    try:
-        parse_query(query)
-    except Exception as e:
-        return str(e)
-    return ""
-
-
-def _matches_parsed_query(run: Run, parsed) -> bool:
-    """Evaluate a parsed Query against a loaded run.
-
-    Mirrors opentine's own match_entry so the console and `tine ls` agree:
-    tags must all be present, model is a case-insensitive substring, status is
-    exact, cost and created_at are bounds, and every free-text term must appear.
-    Evaluating here rather than through RunIndex keeps the console read-only —
-    RunIndex.search writes an index file into the user's runs directory.
-    """
-    try:
-        tags = {str(t).lower() for t in run.tags}
-        if parsed.tags and not all(str(t).lower() in tags for t in parsed.tags):
-            return False
-        if parsed.model and str(parsed.model).lower() not in str(run.model_info or "").lower():
-            return False
-        if parsed.status and run.status.value.lower() != str(parsed.status).lower():
-            return False
-        cost = run.total_cost
-        if parsed.cost_min is not None and cost < parsed.cost_min:
-            return False
-        if parsed.cost_max is not None and cost > parsed.cost_max:
-            return False
-        created = run.created_at or 0.0
-        if parsed.after is not None and created < parsed.after:
-            return False
-        if parsed.before is not None and created > parsed.before:
-            return False
-        if parsed.text:
-            haystack = _run_search_text(run)
-            if not all(str(term).lower() in haystack for term in parsed.text):
-                return False
-    except Exception:
-        return False  # never let a hostile artifact break the run list
-    return True
-
-
-def _run_matches_filter(run: Run, query: str) -> bool:
-    if not query:
-        return True
-    parsed = _parsed_query(query)
-    if parsed is not None:
-        return _matches_parsed_query(run, parsed)
-    return query in _run_search_text(run)
-
-
-def _mapping_lines(data: dict, *, limit: int = 700) -> list[str]:
-    if not data:
-        return ["  (none)"]
-    lines: list[str] = []
-    for key, value in data.items():
-        formatted = _format_value(value, limit)
-        key_text = _oneline(key)
-        if "\n" in formatted:
-            lines.append(f"  {key_text}:")
-            lines.extend(_indent_block(formatted, "    "))
-        else:
-            lines.append(f"  {key_text}: {_oneline(formatted)}")
-    return lines
-
-
-def _format_value(value: object, limit: int) -> str:
-    if isinstance(value, str):
-        return _truncate(value, limit)
-    try:
-        rendered = json.dumps(value, indent=2, sort_keys=True)
-    except TypeError:
-        rendered = str(value)
-    return _truncate(rendered, limit)
-
-
-def _format_run_diff(left: Run, right: Run, *, max_steps: int = 25, max_fields: int = 8) -> str:
-    """Human-readable semantic diff of two runs, using opentine's own Run.diff."""
-    diff = left.diff(right)
-    lines = [
-        f"A: {left.id}",
-        f"B: {right.id}",
-        "",
-        f"Common ancestor: {diff.common_ancestor or '(none - unrelated runs)'}",
-        f"Cost: {_cost_text(left)} -> {_cost_text(right)}",
-        f"Steps: {len(left.steps)} -> {len(right.steps)}",
-        "",
-    ]
-
-    def step_list(label: str, steps) -> None:
-        lines.append(f"{label} ({len(steps)}):")
-        if not steps:
-            lines.append("  (none)")
+    def start(self) -> None:
+        if self._thread is not None:
             return
-        for step in steps[:max_steps]:
-            lines.append(f"  {step.id[:12]}  {_node_label(step)}")
-        if len(steps) > max_steps:
-            lines.append(f"  ...and {len(steps) - max_steps} more")
+        self._thread = threading.Thread(target=self._run, name="opentine-gui-loader", daemon=True)
+        self._thread.start()
 
-    step_list("Only in A", diff.only_a)
-    lines.append("")
-    step_list("Only in B", diff.only_b)
-    lines.append("")
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=2.0)
 
-    lines.append(f"Changed ({len(diff.changed)}):")
-    if not diff.changed:
-        lines.append("  (none)")
-    for change in diff.changed[:max_steps]:
-        a_id = getattr(change.step_a, "id", "?")
-        b_id = getattr(change.step_b, "id", "?")
-        lines.append(f"  {a_id[:12]} -> {b_id[:12]}")
-        for delta in change.fields[:max_fields]:
-            keys = f" [{', '.join(map(str, delta.changed_keys))}]" if delta.changed_keys else ""
-            lines.append(f"    {delta.name}{keys}")
-            lines.append(f"      - {_format_compact(delta.before, 160)}")
-            lines.append(f"      + {_format_compact(delta.after, 160)}")
-        if len(change.fields) > max_fields:
-            lines.append(f"    ...and {len(change.fields) - max_fields} more field(s)")
-    if len(diff.changed) > max_steps:
-        lines.append(f"  ...and {len(diff.changed) - max_steps} more changed step(s)")
-    return "\n".join(lines)
+    def request(self, *, force: bool = True) -> None:
+        """Ask for a scan now. `force` rescans even if nothing looks changed."""
+        with self._lock:
+            self._force = self._force or force
+        self._wake.set()
 
+    def retarget(self, source) -> None:
+        with self._lock:
+            self.source = source
+            self._last_signature = None
+            self._force = True
+        self._wake.set()
 
-#: Problems that still yield a usable run in the list, unlike a parse failure.
-_WARNING_MARKERS = (": integrity ", ": duplicate run id ")
-
-
-def _split_load_problems(problems: list[str]) -> tuple[list[str], list[str]]:
-    """(fatal, warnings) — files that failed to load vs. runs that loaded anyway."""
-    fatal, warnings = [], []
-    for problem in problems:
-        (warnings if any(m in problem for m in _WARNING_MARKERS) else fatal).append(problem)
-    return fatal, warnings
-
-
-def _load_problem_header(fatal: int, warnings: int) -> str:
-    parts = []
-    if fatal:
-        parts.append(f"{fatal} load error(s)")
-    if warnings:
-        parts.append(f"{warnings} warning(s)")
-    return " / ".join(parts) if parts else "Load errors"
-
-
-def _pricing_incompleteness(run: Run) -> tuple[bool, int, int]:
-    """(incomplete, unpriced, total) from manifest.pricing; fails open on any shape.
-
-    opentine records when its catalog could not price an invocation, which makes
-    total_cost a lower bound rather than the spend. Nothing validates the shape
-    of manifest.pricing, so every branch here tolerates arbitrary JSON.
-    """
-    try:
-        pricing = run.manifest.get("pricing")
-    except Exception:
-        return (False, 0, 0)
-    if not isinstance(pricing, dict) or pricing.get("complete") is not False:
-        return (False, 0, 0)  # absent, True, or unreadable -> no caveat
-    raw = pricing.get("invocations")
-    if not isinstance(raw, list):
-        return (True, 0, 0)  # the flag stands; counts unknown
-    items = [i for i in raw if isinstance(i, dict)]
-    unpriced = sum(1 for i in items if i.get("status") not in ("complete", "unmetered"))
-    return (True, unpriced, len(items))
-
-
-def _cost_text(run: Run, amount: float | None = None) -> str:
-    """Cost with a '>=' marker when opentine flagged the pricing as incomplete."""
-    value = run.total_cost if amount is None else amount
-    prefix = ">=" if _pricing_incompleteness(run)[0] else ""
-    return f"{prefix}${value:.4f}"
-
-
-def _pricing_line(run: Run) -> str:
-    incomplete, unpriced, total = _pricing_incompleteness(run)
-    if not incomplete:
-        return ""
-    if total:
-        return (
-            f"Pricing: incomplete - {unpriced} of {total} invocation(s) unpriced "
-            "(cost is a lower bound)"
-        )
-    return "Pricing: incomplete (cost is a lower bound)"
-
-
-#: Roles the runtime records, in the colour the DAG already uses for that kind
-#: of work, so the transcript and the graph read as one system.
-TRANSCRIPT_ROLE_COLORS = {
-    "user": TEXT_PRIMARY,
-    "assistant": ACCENT_TEAL,
-    "tool": BRAND,
-    "system": ACCENT_PURPLE,
-}
-
-
-def _transcript_turns(run: Run) -> list[dict[str, str]]:
-    """Normalise Run.transcript into turns the console can render.
-
-    opentine's runtime writes {"role", "content"} plus a "step_id" on the turns
-    that produced a step, and "name" on tool results. Everything here is
-    artifact-controlled, so each field is coerced and the whole thing fails open.
-    """
-    try:
-        raw = run.transcript or []
-    except Exception:
-        return []
-    turns: list[dict[str, str]] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        content = entry.get("content")
-        if not isinstance(content, str):
-            content = _format_value(content, 4000) if content is not None else ""
-        turns.append(
-            {
-                "role": _oneline(entry.get("role") or "?"),
-                "name": _oneline(entry.get("name") or ""),
-                "step_id": _oneline(entry.get("step_id") or ""),
-                "content": content,
-            }
-        )
-    return turns
-
-
-def _transcript_heading(turn: dict[str, str]) -> str:
-    """The one-line header above a turn's content."""
-    role = turn["role"] or "?"
-    label = f"{role}: {turn['name']}" if turn["name"] else role
-    return f"{label}  [{_truncate(turn['step_id'], 12)}]" if turn["step_id"] else label
-
-
-def _transcript_summary(run: Run) -> str:
-    turns = _transcript_turns(run)
-    if not turns:
-        return (
-            "This run has no transcript. opentine records one when an agent runs; "
-            "artifacts assembled from a graph do not carry it."
-        )
-    roles: dict[str, int] = {}
-    for turn in turns:
-        roles[turn["role"]] = roles.get(turn["role"], 0) + 1
-    linked = sum(1 for t in turns if t["step_id"])
-    return f"{len(turns)} turn(s) - {_format_counts(roles)} - {linked} linked to a step"
-
-
-def _export_path(runs_dir: Path, run_id: str) -> Path:
-    """Where an exported run lands: <runs_dir>/<id>.otel.json, id-safe.
-
-    Reuses the run-id validation the write actions use, so an artifact cannot
-    steer the export outside the runs directory.
-    """
-    safe = _safe_run_path(runs_dir, run_id)
-    return safe.with_suffix(".otel.json")
-
-
-def _span_count(document: object) -> int:
-    """Spans in an OTLP document, tolerating any shape it might take."""
-    try:
-        return sum(
-            len(scope.get("spans", []))
-            for resource in document.get("resourceSpans", [])  # type: ignore[union-attr]
-            for scope in resource.get("scopeSpans", [])
-        )
-    except Exception:
-        return 0
-
-
-def _fork_lineage_lines(run: Run) -> list[str]:
-    """Where a fork came from, and which fork act it is.
-
-    Since opentine 0.4.0 a fork id identifies the *act*, not the
-    (source, point) coordinate, so two sibling forks share forked_from and
-    fork_point while being different runs. The branch and whether the act
-    carried a random nonce are what tell them apart. Pre-0.4.0 forks have no
-    metadata.fork and simply render the origin line.
-    """
-    metadata = run.metadata if isinstance(run.metadata, dict) else {}
-    basis = metadata.get("fork")
-    basis = basis if isinstance(basis, dict) else None
-    # forked_from is unprotected on unsigned artifacts; fall back to the fork
-    # record so stripping it cannot silently downgrade a fork to a root run.
-    origin = metadata.get("forked_from") or (basis.get("source") if basis else "")
-    if not origin:
-        return []
-    point = metadata.get("fork_point") or (basis.get("point") if basis else "")
-    lines = [
-        f"Forked from: {_oneline(_truncate(origin, 120))}"
-        + (f" at step {_oneline(_truncate(point, 80))}" if point else "")
-    ]
-
-    if isinstance(basis, dict):
-        parts = []
-        branch = basis.get("branch")
-        if branch:
-            parts.append(f"branch {branch}")
-        nonce = basis.get("nonce")
-        if isinstance(nonce, str):
-            # An empty nonce is opentine's opt-in to a reproducible fork id;
-            # anything else means this is one specific fork act among possible
-            # siblings that share the same source and point.
-            parts.append("reproducible" if nonce == "" else "unique act")
-        if parts:
-            lines.append(f"Fork: {', '.join(parts)}")
-        # metadata sits outside the integrity digest, so a post-hoc edit to the
-        # fork record still verifies "ok". This is the only check that catches it.
-        if verify_fork_id is not None:
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait(timeout=self.interval)
+            self._wake.clear()
+            if self._stop.is_set():
+                return
+            with self._lock:
+                source = self.source
+                force = self._force
+                self._force = False
+            if not force and not self.auto:
+                continue
             try:
-                verdict = verify_fork_id(run)
+                signature = source.signature()
             except Exception:
-                verdict = None
-            if verdict is False:
-                lines.append("Fork id: DOES NOT MATCH its recorded basis")
-            elif verdict is True:
-                lines.append("Fork id: verified against its recorded basis")
-    reason = metadata.get("fork_reason")
-    if reason:
-        lines.append(f"{_fork_reason_label(basis, reason)}: {_oneline(_truncate(reason, 200))}")
-    return lines
+                signature = ()
+            if not force and signature == self._last_signature:
+                continue
+            try:
+                snapshot = source.scan()
+            except Exception as e:  # a source must never take the console down
+                snapshot = Snapshot(
+                    kind=getattr(source, "kind", "directory"),
+                    root=getattr(source, "root", Path(".")),
+                    errors=[f"scan failed: {e}"],
+                )
+            self._last_signature = snapshot.signature or signature
+            self.results.put(snapshot)
+
+    def drain(self) -> Snapshot | None:
+        """The newest finished snapshot, or None. Older ones are discarded."""
+        latest = None
+        while True:
+            try:
+                latest = self.results.get_nowait()
+            except queue.Empty:
+                return latest
 
 
-def _fork_reason_label(basis: object, reason: object) -> str:
-    """"Fork reason", or flagged unverified when the text is not attested.
+class OpentineGUI:
+    def __init__(self, runs_dir: Path | None = None) -> None:
+        self._preferences = _load_preferences()
+        preferred_dir = self._preferences.get("last_runs_dir")
+        if runs_dir is None and preferred_dir:
+            self._runs_dir = Path(preferred_dir).expanduser()
+        else:
+            self._runs_dir = runs_dir or DEFAULT_RUNS_DIR
+        self._source = open_source(self._runs_dir)
+        self._snapshot = Snapshot(root=self._runs_dir)
+        self._entries: list[RunEntry] = []
+        self._errors: list[str] = []
+        self._selected_key: str | None = None
+        self._selected_run: Run | None = None
+        self._selected_step: Step | None = None
+        self._run_filter = self._preferences.get("last_filter", "").strip().lower()
+        self._step_filter = ""
+        self._sort_column = self._preferences.get("sort_column", "age")
+        self._sort_ascending = self._preferences.get("sort_ascending", "0") == "1"
+        self._layout_left = 0
+        self._layout_dag_cols = 0
+        self._relayout_pending = False
+        self._pending_select: str | None = None
+        self._messages: list[_Message] = []
+        self._trust = trust.load_trust_config(self._preferences)
+        self._loader = _Loader(self._source)
+        self._filter_dirty_at: float | None = None
+        self._preferences_dirty_at: float | None = None
+        self._node_ids: dict[str, int | str] = {}
+        self._quote: pricing.RunQuote | None = None
+        self._quote_key: str | None = None
+        #: Label -> entry key for the comparison picker, and the pending action
+        #: a confirmation is guarding. Both are set by the dialog that owns them.
+        self._diff_choices: dict[str, str] = {}
+        self._confirm_action = None
+        #: A run id to select as soon as a scan reports it. A write action knows
+        #: what it made before the source has been re-read, and the row it should
+        #: land on does not exist until then.
+        self._select_after_scan: str | None = None
 
-    opentine deliberately leaves `metadata.fork_reason` out of
-    `_SIGNED_METADATA_KEYS` (for 0.3.0 signature compatibility) and the whole
-    metadata block sits outside the integrity digest, so the plaintext can be
-    rewritten on a signed, integrity-clean artifact. `metadata.fork.intent` IS
-    signed and IS committed to by the run id, and it is sha256 over the
-    canonical intent object — so a reason that reproduces it is bound to the
-    fork act, and one that does not must not be shown as if it were.
-    """
-    if not isinstance(basis, dict) or not isinstance(reason, str):
-        return "Fork reason (unverified)"
-    recorded = basis.get("intent")
-    if not isinstance(recorded, str):
-        return "Fork reason (unverified)"
-    # Byte-identical to opentine's own canonical encoding for this shape,
-    # so no private module is imported.
-    canonical = json.dumps({"reason": reason}, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return "Fork reason" if digest == recorded else "Fork reason (unverified)"
+    # ------------------------------------------------------------------ setup
 
-
-def _budget_line(run: Run) -> str:
-    """Configured budget with the incurred total beside each limit, if any."""
-    try:
-        budget = run.budget()
-    except Exception:
-        return ""
-    if budget is None:
-        return ""
-    parts: list[str] = []
-    if budget.max_cost is not None:
-        parts.append(f"cost {_cost_text(run)}/${budget.max_cost:.4f}")
-    if budget.max_steps is not None:
-        parts.append(f"steps {len(run.steps)}/{budget.max_steps}")
-    if budget.max_duration is not None:
-        parts.append(f"duration {run.total_duration:.1f}s/{budget.max_duration:.1f}s")
-    if budget.max_usage is not None:
-        parts.append(f"tokens {run.total_tokens}/{budget.max_usage}")
-    if not parts:
-        return ""
-    return f"Budget: {', '.join(parts)} (on breach: {budget.on_breach})"
-
-
-def _budget_breach_line(run: Run) -> str:
-    """Why a run died, when opentine halted it for exceeding its budget.
-
-    opentine records metadata['budget_state'] and sets status=failed. Without
-    this the run looks like any other failure and the user hunts for a crash
-    that never happened. metadata is untrusted and outside the integrity
-    digest, so every field is treated as advisory.
-    """
-    state = run.metadata.get("budget_state") if isinstance(run.metadata, dict) else None
-    if not isinstance(state, dict) or not state.get("breached"):
-        return ""
-    dimension = state.get("dimension") or "budget"
-    incurred, limit = state.get("incurred"), state.get("limit")
-    if incurred is None or limit is None:
-        return f"Budget BREACHED: {dimension}"
-    return f"Budget BREACHED: {dimension} {incurred} > {limit}"
-
-
-def _cost_attribution_lines(run: Run, *, limit: int = 4) -> list[str]:
-    """Where the money went, when more than one model or kind spent any."""
-    try:
-        breakdown = run.cost_breakdown()
-    except Exception:
-        return []
-    lines: list[str] = []
-    for label, mapping in (("model", breakdown.by_model), ("kind", breakdown.by_kind)):
-        spenders = sorted(
-            ((k, v) for k, v in (mapping or {}).items() if v), key=lambda kv: -kv[1]
+    def run(self) -> None:
+        _windows_set_dpi_aware()  # before any window, and whatever the scale is
+        scale = set_ui_scale(_detect_ui_scale())
+        _reset_theme_caches()
+        dpg.create_context()
+        # Dear PyGui dispatches every callback on a dedicated non-main thread.
+        # Selecting a run, typing in the DAG filter or confirming a fork all
+        # delete and recreate hundreds of node-editor items, which races the
+        # renderer mid-frame and crashes natively. Draining the queue ourselves
+        # runs every callback on the render thread, between frames.
+        dpg.configure_app(manual_callback_management=True)
+        dpg.bind_theme(_app_theme())
+        if not self._bind_ui_font() and scale != 1.0:
+            # No TTF available: scale the built-in bitmap font instead.
+            dpg.set_global_font_scale(scale)
+        width, height, min_width, min_height = _viewport_geometry()
+        dpg.create_viewport(
+            title="opentine - agent run console",
+            width=width,
+            height=height,
+            min_width=min_width,
+            min_height=min_height,
         )
-        if len(spenders) < 2:
-            continue  # a single spender adds nothing over the Cost line
-        shown = ", ".join(f"{k or '(unattributed)'} ${v:.4f}" for k, v in spenders[:limit])
-        if len(spenders) > limit:
-            shown += f", +{len(spenders) - limit} more"
-        lines.append(f"Cost by {label}: {shown}")
-    return lines
+
+        self._build_ui()
+
+        dpg.set_primary_window("primary", True)
+        dpg.set_viewport_resize_callback(self._on_viewport_resize)
+        dpg.setup_dearpygui()
+        dpg.show_viewport()
+        self._on_viewport_resize()
+        self._loader.start()
+        self._loader.request(force=True)
+        self._note(
+            "info",
+            f"opentine-gui {_GUI_VERSION} reading with opentine {_OPENTINE_VERSION}",
+        )
+        try:
+            while dpg.is_dearpygui_running():
+                try:
+                    dpg.run_callbacks(dpg.get_callback_queue())
+                    self._apply_pending_input()
+                    self._apply_pending_relayout()
+                    self._apply_snapshot()
+                    self._apply_deferred_writes()
+                except Exception as e:  # one bad .tine must not take down the console
+                    self._note("error", f"Refresh failed: {e}")
+                dpg.render_dearpygui_frame()
+        finally:
+            self._loader.stop()
+            self._flush_preferences()
+            dpg.destroy_context()
+
+    def _build_ui(self) -> None:
+        """Create every widget. Separate from run() so a test can build the
+        console into a Dear PyGui stand-in without a graphics context."""
+        with dpg.window(tag="primary"):
+            self._build_menu_bar()
+            self._build_top_bar()
+            with dpg.group(horizontal=True):
+                self._build_run_list()
+                self._build_detail_panel()
+                self._build_dag_panel()
+            self._build_status_bar()
+
+        self._build_dir_picker()
+        self._build_diff_dialog()
+        self._build_fork_dialog()
+        self._build_transcript_dialog()
+        self._build_text_dialog()
+        self._build_panel_dialog()
+        self._build_confirm_dialog()
+        self._build_help_dialog()
+        self._build_key_bindings()
+
+    def _scan_now(self) -> None:
+        """Scan the source on this thread and apply the result immediately.
+
+        The console normally scans on the loader thread; this is the path a
+        test drives, and the one an action takes when it needs the panels to
+        reflect a write it just made rather than a snapshot from before it.
+        """
+        try:
+            snapshot = self._source.scan()
+        except Exception as e:
+            snapshot = Snapshot(
+                kind=getattr(self._source, "kind", "directory"),
+                root=self._runs_dir,
+                errors=[f"scan failed: {e}"],
+            )
+        self._loader.results.put(snapshot)
+        self._apply_snapshot()
+
+    def _build_menu_bar(self) -> None:
+        with dpg.menu_bar():
+            with dpg.menu(label="File"):
+                dpg.add_menu_item(label="Refresh   Ctrl+R", callback=self._force_refresh)
+                dpg.add_menu_item(
+                    label="Change runs dir...   Ctrl+O", callback=self._open_dir_picker
+                )
+                dpg.add_separator()
+                dpg.add_menu_item(
+                    label="Import a trace...",
+                    callback=self._open_import_dialog,
+                    tag="menu_import",
+                )
+                dpg.add_separator()
+                dpg.add_menu_item(label="Quit", callback=self._quit)
+            with dpg.menu(label="Run"):
+                dpg.add_menu_item(label="Pause", callback=self._pause_selected, tag="menu_pause")
+                dpg.add_menu_item(label="Resume", callback=self._resume_selected, tag="menu_resume")
+                dpg.add_separator()
+                dpg.add_menu_item(
+                    label="Fork from step", callback=self._fork_selected, tag="menu_fork"
+                )
+                dpg.add_menu_item(
+                    label="Fork to branch...",
+                    callback=self._open_fork_dialog,
+                    tag="menu_fork_branch",
+                )
+                dpg.add_separator()
+                dpg.add_menu_item(
+                    label="Transcript...", callback=self._open_transcript, tag="menu_transcript"
+                )
+                dpg.add_menu_item(
+                    label="Price this run...", callback=self._open_pricing, tag="menu_pricing"
+                )
+                dpg.add_menu_item(
+                    label="Compare with...", callback=self._open_diff_dialog, tag="menu_diff"
+                )
+                dpg.add_separator()
+                dpg.add_menu_item(
+                    label="Export as OpenTelemetry JSON",
+                    callback=self._export_otel,
+                    tag="menu_export_otel",
+                )
+            with dpg.menu(label="View"):
+                dpg.add_menu_item(
+                    label="Statistics...", callback=self._open_stats, tag="menu_stats"
+                )
+                dpg.add_menu_item(
+                    label="Repository refs...", callback=self._open_refs, tag="menu_refs"
+                )
+                dpg.add_separator()
+                dpg.add_menu_item(
+                    label="Auto-refresh",
+                    callback=self._toggle_auto_refresh,
+                    check=True,
+                    default_value=True,
+                    tag="menu_auto_refresh",
+                )
+                dpg.add_menu_item(
+                    label="Message log",
+                    callback=self._toggle_messages,
+                    check=True,
+                    default_value=True,
+                    tag="menu_messages",
+                )
+            with dpg.menu(label="Help"):
+                dpg.add_menu_item(label="Keyboard and features   F1", callback=self._open_help)
+                dpg.add_menu_item(label="About", callback=self._open_about)
+
+    def _build_top_bar(self) -> None:
+        with dpg.group(horizontal=True):
+            dpg.add_text("opentine", color=TEXT_PRIMARY)
+            dpg.add_text("agent run console", color=TEXT_MUTED)
+            dpg.add_spacer(width=_px(16))
+            dpg.add_text("", tag="source_badge", color=BRAND)
+            dpg.add_spacer(width=_px(8))
+            dpg.add_text(_sanitize(str(self._runs_dir)), tag="top_runs_dir", color=TEXT_MUTED)
+        dpg.add_separator()
+
+    def _build_run_list(self) -> None:
+        with dpg.child_window(width=_px(400), height=-_px(76), border=True, tag="panel_runs"):
+            _panel_header("Runs", "Search, select, and manage traces")
+            with dpg.group(horizontal=True):
+                dpg.add_input_text(
+                    hint="Search, or status:failed model:opus cost:>0.01 tag:bug",
+                    tag="run_filter",
+                    default_value=self._run_filter,
+                    width=-_px(52),
+                    callback=self._on_filter_change,
+                )
+                dpg.add_button(label="x", width=_px(28), callback=self._clear_run_filter)
+                _hint(dpg.last_item(), "Clear the run filter (Esc)")
+            dpg.add_text("", tag="run_summary", wrap=_px(300), color=TEXT_SECONDARY)
+            with dpg.group(horizontal=True):
+                _action_button("Pause", self._pause_selected, "btn_pause")
+                _action_button("Resume", self._resume_selected, "btn_resume")
+                _action_button("Fork", self._fork_selected, "btn_fork")
+                _action_button("Diff", self._open_diff_dialog, "btn_diff")
+            dpg.add_separator()
+            # `resizable` and `hideable` are not decoration: Dear PyGui ignores
+            # `configure_item(column, show=...)` entirely, so the only way a
+            # reader can trade one column for another in a narrow sidebar is the
+            # table's own header menu. `Age` starts hidden for the same reason —
+            # it is the least load-bearing column, and the row tooltip has it.
+            with dpg.table(
+                header_row=True,
+                borders_innerH=True,
+                borders_outerH=True,
+                row_background=True,
+                resizable=True,
+                hideable=True,
+                reorderable=True,
+                sortable=True,
+                context_menu_in_body=True,
+                callback=self._on_table_sort,
+                policy=dpg.mvTable_SizingStretchProp,
+                tag="run_table",
+            ):
+                dpg.add_table_column(label="Run", tag="col_id", init_width_or_weight=2.2)
+                dpg.add_table_column(label="State", tag="col_status", init_width_or_weight=1.2)
+                dpg.add_table_column(label="Model", tag="col_model", init_width_or_weight=1.7)
+                dpg.add_table_column(label="Steps", tag="col_steps", init_width_or_weight=0.7)
+                dpg.add_table_column(label="Cost", tag="col_cost", init_width_or_weight=1.2)
+                dpg.add_table_column(
+                    label="Age", tag="col_age", init_width_or_weight=0.7, default_hide=True
+                )
+            dpg.add_separator()
+            dpg.add_text("Load errors", color=ACCENT_ORANGE, tag="err_header", show=False)
+            dpg.add_text("", tag="err_text", wrap=_px(312), color=ACCENT_ORANGE)
+
+    def _build_detail_panel(self) -> None:
+        with dpg.child_window(width=_px(500), height=-_px(76), border=True, tag="panel_detail"):
+            with dpg.group(horizontal=True):
+                _panel_header("Run inspector", "Trace metadata", "panel_detail_subtitle")
+                dpg.add_spacer(width=_px(8))
+                # Ids are hashes and get elided on screen; the CLI needs them whole.
+                _action_button("Copy id", self._copy_run_id, "btn_copy_run", width=0)
+                _action_button("Copy all", self._copy_run_detail, "btn_copy_run_detail", width=0)
+                _action_button("Expand", self._expand_run_detail, "btn_expand_run", width=0)
+            dpg.add_separator()
+            dpg.add_text("Select a run", tag="detail_text", wrap=_px(452), color=TEXT_SECONDARY)
+            dpg.add_spacer(height=_px(10))
+            with dpg.group(horizontal=True):
+                _panel_header("Step inspector", "Inputs, outputs, cost", "panel_step_subtitle")
+                dpg.add_spacer(width=_px(8))
+                _action_button("Copy id", self._copy_step_id, "btn_copy_step", width=0)
+                _action_button("Copy all", self._copy_step_detail, "btn_copy_step_detail", width=0)
+                _action_button("Expand", self._expand_step_detail, "btn_expand_step", width=0)
+            dpg.add_separator()
+            dpg.add_text(
+                "Select a step in the DAG",
+                tag="step_text",
+                wrap=_px(452),
+                color=TEXT_SECONDARY,
+            )
+
+    def _build_dag_panel(self) -> None:
+        with dpg.child_window(border=True, height=-_px(76), tag="panel_dag"):
+            _panel_header("Step DAG", "Parent-child execution graph")
+            dpg.add_text(
+                "Select a run to inspect its opentine step graph.",
+                tag="dag_summary",
+                wrap=_px(580),
+                color=TEXT_SECONDARY,
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_input_text(
+                    hint="Highlight: id, kind, tool, provider, payload (Enter)",
+                    tag="step_filter",
+                    width=_px(330),
+                    callback=self._on_step_filter_change,
+                    on_enter=True,
+                )
+                dpg.add_button(label="Clear", callback=self._clear_step_filter, width=_px(64))
+                dpg.add_button(label="Fit", callback=self._fit_dag, width=_px(48))
+                _hint(dpg.last_item(), "Scroll the graph back to its first node")
+                dpg.add_button(label="Next match", callback=self._focus_next_match, width=_px(96))
+                _hint(dpg.last_item(), "Select and scroll to the next highlighted step")
+            with dpg.group(horizontal=True):
+                for kind in StepKind:
+                    dpg.add_text(kind.value, color=STEP_COLORS[kind])
+                dpg.add_spacer(width=_px(12))
+                dpg.add_text("causal edge", color=ACCENT_PURPLE)
+                _hint(
+                    dpg.last_item(),
+                    "A non-parent step this one required. A fork keeps these too.",
+                )
+            dpg.add_separator()
+            with dpg.node_editor(
+                tag="dag_editor",
+                callback=self._on_link_created,
+                delink_callback=self._on_link_deleted,
+                minimap=True,
+                minimap_location=dpg.mvNodeMiniMap_Location_BottomRight,
+            ):
+                pass
+
+    def _build_status_bar(self) -> None:
+        dpg.add_separator()
+        with dpg.child_window(height=_px(62), border=False, tag="panel_messages"):
+            with dpg.group(horizontal=True):
+                dpg.add_text("", tag="status_bar", color=TEXT_SECONDARY)
+                dpg.add_spacer(width=_px(8))
+                dpg.add_text("", tag="status_meta", color=TEXT_MUTED)
+            dpg.add_child_window(height=-1, border=False, tag="message_log")
+
+    def _build_key_bindings(self) -> None:
+        """Global shortcuts.
+
+        Every handler runs on the render thread, like all other callbacks, since
+        the loop drains the callback queue itself. Selection is still recorded
+        and applied in `_apply_pending_input` so that holding a key down cannot
+        rebuild the graph more than once per frame.
+        """
+        with dpg.handler_registry(tag="global_keys"):
+            dpg.add_key_press_handler(dpg.mvKey_Down, callback=lambda: self._move_selection(1))
+            dpg.add_key_press_handler(dpg.mvKey_Up, callback=lambda: self._move_selection(-1))
+            dpg.add_key_press_handler(dpg.mvKey_Escape, callback=self._on_escape)
+            dpg.add_key_press_handler(dpg.mvKey_F, callback=self._on_ctrl_f)
+            dpg.add_key_press_handler(dpg.mvKey_C, callback=self._on_ctrl_c)
+            dpg.add_key_press_handler(dpg.mvKey_R, callback=self._on_ctrl_r)
+            dpg.add_key_press_handler(dpg.mvKey_O, callback=self._on_ctrl_o)
+            dpg.add_key_press_handler(dpg.mvKey_F1, callback=self._on_help_key)
+
+    def _bind_ui_font(self) -> bool:
+        """Load a real font so non-ASCII agent output is legible. False if none."""
+        path = _find_ui_font()
+        if path is None:
+            return False
+        try:
+            with dpg.font_registry():
+                with dpg.font(str(path), _px(FONT_SIZE)) as font:
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    # Latin-1 accents plus the punctuation and symbols that
+                    # actually show up in model output (dashes, arrows, checks).
+                    for first, last in EXTRA_GLYPH_RANGES:
+                        dpg.add_font_range(first, last)
+                    if os.environ.get("OPENTINE_GUI_FONT"):
+                        # The user pointed us at a specific face; assume they did
+                        # so for a script the default cannot draw. These hints
+                        # are large, so they are not loaded by default.
+                        for hint in (
+                            dpg.mvFontRangeHint_Cyrillic,
+                            dpg.mvFontRangeHint_Japanese,
+                            dpg.mvFontRangeHint_Chinese_Simplified_Common,
+                            dpg.mvFontRangeHint_Korean,
+                        ):
+                            dpg.add_font_range_hint(hint)
+            dpg.bind_font(font)
+        except Exception:
+            return False  # a broken/unsupported face must not stop the console
+        return True
+
+    # --------------------------------------------------------------- plumbing
+
+    def _typing(self) -> bool:
+        """True while a text field has focus, so keys reach the field, not us."""
+        return any(
+            dpg.does_item_exist(tag) and dpg.is_item_focused(tag)
+            for tag in (
+                "run_filter",
+                "step_filter",
+                "dir_picker_input",
+                "fork_branch",
+                "fork_reason",
+                "import_path",
+                "text_body",
+            )
+        )
+
+    MODALS = (
+        "fork_dialog",
+        "diff_dialog",
+        "dir_picker",
+        "transcript_dialog",
+        "text_dialog",
+        "panel_dialog",
+        "confirm_dialog",
+        "help_dialog",
+    )
+
+    def _modal_open(self) -> str | None:
+        for tag in self.MODALS:
+            if dpg.does_item_exist(tag) and dpg.is_item_shown(tag):
+                return tag
+        return None
+
+    def _command_down(self) -> bool:
+        """The platform's command modifier: Ctrl everywhere, Cmd on macOS."""
+        if dpg.is_key_down(dpg.mvKey_ModCtrl):
+            return True
+        return sys.platform == "darwin" and dpg.is_key_down(dpg.mvKey_ModSuper)
+
+    def _note(self, level: str, message: str) -> None:
+        """Say something, in a place that the next refresh will not overwrite."""
+        text = _oneline(message)
+        self._messages.append(_Message(level=level, text=text, at=time.time()))
+        del self._messages[:-MAX_MESSAGES]
+        if dpg.does_item_exist("status_bar"):
+            dpg.set_value("status_bar", text)
+        if dpg.does_item_exist("message_log"):
+            dpg.add_text(
+                f"{time.strftime('%H:%M:%S')}  {text}",
+                parent="message_log",
+                color=LEVEL_COLORS.get(level, TEXT_SECONDARY),
+                wrap=_px(1100),
+            )
+            children = dpg.get_item_children("message_log", slot=1) or []
+            for stale in children[:-MAX_MESSAGES]:
+                dpg.delete_item(stale)
+            dpg.set_y_scroll("message_log", -1.0)
+
+    def _set_status(self, msg: str) -> None:
+        """A transient line. Anything a user may need to act on goes to _note."""
+        if dpg.does_item_exist("status_bar"):
+            dpg.set_value("status_bar", _oneline(msg))
+
+    def _quit(self) -> None:
+        dpg.stop_dearpygui()
+
+    def _toggle_auto_refresh(self) -> None:
+        enabled = bool(dpg.get_value("menu_auto_refresh"))
+        self._loader.auto = enabled
+        self._note("info", f"Auto-refresh {'on' if enabled else 'off'}")
+
+    def _toggle_messages(self) -> None:
+        show = bool(dpg.get_value("menu_messages"))
+        if dpg.does_item_exist("panel_messages"):
+            dpg.configure_item("panel_messages", height=_px(62) if show else _px(24))
+        if dpg.does_item_exist("message_log"):
+            dpg.configure_item("message_log", show=show)
+
+    def _force_refresh(self) -> None:
+        self._loader.request(force=True)
+        self._set_status("Refreshing...")
+
+    # ------------------------------------------------------------- key events
+
+    def _move_selection(self, delta: int) -> None:
+        if self._typing() or self._modal_open():
+            return
+        # Only what the table actually drew: stepping past the cap would select
+        # a run with no row on screen, leaving the inspector describing a run the
+        # reader cannot see or point at.
+        visible = self._visible_entries()[:MAX_TABLE_ROWS]
+        if not visible:
+            return
+        keys = [entry.key for entry in visible]
+        if self._selected_key is None or self._selected_key not in keys:
+            index = 0
+        else:
+            index = min(max(keys.index(self._selected_key) + delta, 0), len(keys) - 1)
+        self._pending_select = keys[index]
+
+    def _on_escape(self) -> None:
+        modal = self._modal_open()
+        if modal == "confirm_dialog":
+            self._confirm_cancel()
+        elif modal:
+            dpg.configure_item(modal, show=False)
+        elif self._step_filter:
+            self._clear_step_filter()
+        elif self._run_filter:
+            self._clear_run_filter()
+
+    def _on_ctrl_f(self) -> None:
+        if self._command_down() and not self._modal_open() and dpg.does_item_exist("run_filter"):
+            dpg.focus_item("run_filter")
+
+    def _on_ctrl_c(self) -> None:
+        if self._command_down() and not self._typing() and not self._modal_open():
+            self._copy_run_id()
+
+    def _on_ctrl_r(self) -> None:
+        if self._command_down() and not self._typing():
+            self._force_refresh()
+
+    def _on_ctrl_o(self) -> None:
+        if self._command_down() and not self._typing() and not self._modal_open():
+            self._open_dir_picker()
+
+    def _on_help_key(self) -> None:
+        if not self._typing():
+            self._open_help()
+
+    def _apply_pending_input(self) -> None:
+        """Consume a keyboard-requested selection between frames."""
+        key, self._pending_select = self._pending_select, None
+        if key is not None and key != self._selected_key:
+            self._select_entry(key)
+
+    def _apply_pending_relayout(self) -> None:
+        """Rebuild the table/DAG a resize invalidated, between frames.
+
+        Dear PyGui delivers resize callbacks on its own thread while the render
+        thread is mid-frame; creating and deleting hundreds of node items from
+        there races the renderer. The callback only records what changed.
+        """
+        if not self._relayout_pending:
+            return
+        self._relayout_pending = False
+        if dpg.does_item_exist("run_table"):
+            self._render_run_table()
+        if self._selected_run is not None and dpg.does_item_exist("dag_editor"):
+            self._rebuild_dag(
+                self._selected_run, highlight=self._current_matches(self._selected_run)
+            )
+
+    def _apply_deferred_writes(self) -> None:
+        """Debounced work: the filter, and the preferences file."""
+        now = time.monotonic()
+        filtering = self._filter_dirty_at
+        if filtering is not None and now - filtering >= FILTER_DEBOUNCE_SECONDS:
+            self._filter_dirty_at = None
+            self._render_run_table()
+            self._update_action_state()
+            problem = _query_error(self._run_filter)
+            if problem:
+                self._set_status(f"{problem} - falling back to a plain text search")
+            else:
+                shown = len(self._visible_entries())
+                self._set_status(
+                    f"{self._source.label} - {shown}/{len(self._entries)} run(s) shown"
+                )
+        if (
+            self._preferences_dirty_at is not None
+            and now - self._preferences_dirty_at >= PREFERENCES_FLUSH_SECONDS
+        ):
+            self._flush_preferences()
+
+    # ---------------------------------------------------------------- refresh
+
+    def _apply_snapshot(self) -> None:
+        snapshot = self._loader.drain()
+        if snapshot is None:
+            return
+        if snapshot.root != self._runs_dir:
+            # A scan of the directory the user has just left. Applying it would
+            # repopulate the panels with runs from somewhere else.
+            return
+        self._snapshot = snapshot
+        self._entries = snapshot.entries
+        self._errors = snapshot.errors
+        selected = self._selected_key
+        entry = snapshot.entry(selected) if selected else None
+        if selected and entry is None:
+            self._selected_key = None
+            self._selected_run = None
+            self._selected_step = None
+            dpg.set_value("detail_text", "Select a run")
+            dpg.set_value("step_text", "Select a step in the DAG")
+            self._clear_dag()
+        elif entry is not None:
+            previous, self._selected_run = self._selected_run, entry.run
+            self._show_run_detail(entry)
+            if previous is not entry.run:
+                # Rebuilding the graph resets pan, zoom and node positions, so
+                # it happens only when the run's own bytes actually changed.
+                self._rebuild_dag(entry.run, highlight=self._current_matches(entry.run))
+            if self._selected_step is not None:
+                step = entry.run.get_step(self._selected_step.id)
+                self._selected_step = step
+                if step is not None:
+                    self._show_step_detail(step)
+                else:
+                    dpg.set_value("step_text", "That step is no longer in this run")
+        pending, self._select_after_scan = self._select_after_scan, None
+        if pending is not None:
+            target = next((e for e in snapshot.entries if str(e.run.id) == pending), None)
+            if target is not None:
+                self._select_entry(target.key)
+            else:
+                self._select_after_scan = pending  # not written yet; try the next scan
+        self._render_run_table()
+        self._render_errors()
+        self._update_action_state()
+        self._render_source_badge()
+        if dpg.does_item_exist("status_meta"):
+            dpg.set_value("status_meta", f"updated {time.strftime('%H:%M:%S')}")
+        shown = len(self._visible_entries())
+        filter_note = f", {shown} shown" if self._run_filter else ""
+        summary = f"{self._source.label} - {len(self._entries)} run(s){filter_note}"
+        if self._errors:
+            summary += f", {len(self._errors)} problem(s)"
+        self._set_status(summary)
+        if snapshot.note:
+            self._note("warn", snapshot.note)
+
+    def _render_source_badge(self) -> None:
+        if not dpg.does_item_exist("source_badge"):
+            return
+        if self._snapshot.kind == "repository":
+            dpg.configure_item("source_badge", color=ACCENT_PURPLE)
+            dpg.set_value("source_badge", "v3 repository (read-only)")
+        else:
+            dpg.configure_item("source_badge", color=BRAND)
+            dpg.set_value("source_badge", ".tine directory")
+        dir_str = _sanitize(str(self._runs_dir))
+        if len(dir_str) > 64:
+            dir_str = "..." + dir_str[-61:]
+        dpg.set_value("top_runs_dir", dir_str)
+
+    @property
+    def _runs(self) -> list[Run]:
+        """Every loaded run, in snapshot order."""
+        return [entry.run for entry in self._entries]
+
+    @property
+    def _run_paths(self) -> dict[str, Path]:
+        """run id -> the file it came from, for the sources that have files."""
+        return {str(e.run.id): e.path for e in self._entries if e.path is not None}
+
+    def _refresh(self) -> None:
+        """Scan now and render the result, rather than waiting for the loader."""
+        self._scan_now()
+
+    def _select_run(self, run_id: str) -> None:
+        """Select by run id. Repository rows are keyed by object id instead."""
+        entry = next((e for e in self._entries if str(e.run.id) == str(run_id)), None)
+        if entry is not None:
+            self._select_entry(entry.key)
+
+    def _trust_lines(self, run: Run) -> list[str]:
+        """The trust block for a loaded run, through the configured key material."""
+        entry = next((e for e in self._entries if str(e.run.id) == str(run.id)), None)
+        if entry is None or entry.path is None:
+            entry_of_selection = self._selected_entry()
+            if entry_of_selection is not None and entry_of_selection.run is run:
+                entry = entry_of_selection
+        if entry is None or entry.path is None:
+            return _trust_lines(None, config=self._trust)
+        return _trust_lines(entry.path, config=self._trust)
+
+    def _visible_entries(self) -> list[RunEntry]:
+        entries = [e for e in self._entries if _run_matches_filter(e.run, self._run_filter)]
+        return self._sorted(entries)
+
+    def _sorted(self, entries: list[RunEntry]) -> list[RunEntry]:
+        column = self._sort_column
+        reverse = not self._sort_ascending
+
+        def key(entry: RunEntry):
+            run = entry.run
+            try:
+                if column == "id":
+                    return str(run.id).lower()
+                if column == "status":
+                    return run.status.value
+                if column == "model":
+                    return str(run.model_info or "").lower()
+                if column == "steps":
+                    return len(run.steps)
+                if column == "cost":
+                    return float(run.total_cost)
+            except Exception:
+                return ""
+            return entry.mtime or getattr(run, "created_at", 0.0) or 0.0
+
+        try:
+            return sorted(entries, key=key, reverse=reverse)
+        except TypeError:  # mixed types from a hostile artifact
+            return entries
+
+    def _filtered_runs(self) -> list[Run]:
+        return [entry.run for entry in self._visible_entries()]
+
+    def _render_run_table(self) -> None:
+        if not dpg.does_item_exist("run_table"):
+            return
+        for child in dpg.get_item_children("run_table", slot=1) or []:
+            dpg.delete_item(child)
+        visible = self._visible_entries()
+        shown = visible[:MAX_TABLE_ROWS]
+        for entry in shown:
+            run = entry.run
+            selected = entry.key == self._selected_key
+            with dpg.table_row(parent="run_table"):
+                label = _elide_middle(str(run.id), 18)
+                dpg.add_selectable(
+                    label=label,
+                    default_value=selected,
+                    span_columns=True,
+                    callback=self._on_run_selected,
+                    user_data=entry.key,
+                )
+                _hint(dpg.last_item(), self._row_tooltip(entry))
+                dpg.add_text(
+                    run.status.value, color=RUN_STATUS_COLORS.get(run.status, TEXT_PRIMARY)
+                )
+                dpg.add_text(_truncate(_oneline(run.model_info) or "-", 22))
+                dpg.add_text(str(len(run.steps)))
+                dpg.add_text(_cost_cell(run))
+                dpg.add_text(_format_age(entry.mtime or getattr(run, "created_at", 0.0)))
+        if len(visible) > len(shown):
+            with dpg.table_row(parent="run_table"):
+                dpg.add_text(f"...{len(visible) - len(shown)} more not shown", color=TEXT_MUTED)
+                for _ in range(5):
+                    dpg.add_text("")
+        dpg.set_value(
+            "run_summary",
+            _run_list_summary(
+                [e.run for e in self._entries],
+                [e.run for e in visible],
+                self._run_filter,
+            ),
+        )
+        if not visible:
+            with dpg.table_row(parent="run_table"):
+                if self._run_filter:
+                    msg = "No runs match this filter"
+                elif self._errors:
+                    msg = "Nothing loaded - see the problems below"
+                else:
+                    msg = "No .tine runs here yet"
+                dpg.add_text(msg, color=TEXT_MUTED)
+                for _ in range(5):
+                    dpg.add_text("")
+
+    def _row_tooltip(self, entry: RunEntry) -> str:
+        """What the row's own columns are too narrow to say."""
+        run = entry.run
+        parts = [
+            str(run.id),
+            f"{run.status.value}  {len(run.steps)} step(s)  {_cost_cell(run)}",
+            f"model {_oneline(run.model_info) or '(none)'}",
+            f"created {_format_timestamp(getattr(run, 'created_at', 0.0))}",
+        ]
+        if entry.location:
+            parts.append(f"stored {_oneline(entry.location)}")
+        if entry.refs:
+            parts.append("refs " + ", ".join(_oneline(r) for r in entry.refs))
+        if run.tags:
+            parts.append("tags " + ", ".join(_oneline(tag) for tag in sorted(run.tags)))
+        return "\n".join(parts)
+
+    def _on_table_sort(self, sender, sort_specs) -> None:
+        """Dear PyGui hands back [[column_id, direction], ...], or None."""
+        try:
+            if not sort_specs:
+                return
+            column_id, direction = sort_specs[0][0], sort_specs[0][1]
+            for name in TABLE_COLUMNS:
+                tag = f"col_{name}"
+                if dpg.does_item_exist(tag) and dpg.get_alias_id(tag) == column_id:
+                    self._sort_column = name
+                    break
+            self._sort_ascending = direction > 0
+        except Exception:
+            return
+        self._preferences["sort_column"] = self._sort_column
+        self._preferences["sort_ascending"] = "1" if self._sort_ascending else "0"
+        self._touch_preferences()
+        self._render_run_table()
+
+    def _render_errors(self) -> None:
+        if self._errors:
+            fatal, warnings = _split_load_problems(self._errors)
+            dpg.configure_item(
+                "err_header",
+                show=True,
+                default_value=_load_problem_header(len(fatal), len(warnings)),
+            )
+            # Files that did not load at all come first: a warning about a run
+            # the user can still open must not push a missing run out of view.
+            ordered = fatal + warnings
+            shown = [_oneline(_truncate(e, 160)) for e in ordered[:10]]
+            if len(ordered) > len(shown):
+                shown.append(f"...and {len(ordered) - len(shown)} more")
+            dpg.set_value("err_text", _sanitize("\n".join(shown)))
+        else:
+            dpg.configure_item("err_header", show=False)
+            dpg.set_value("err_text", "")
+
+    # -------------------------------------------------------------- selection
+
+    def _on_run_selected(self, sender, app_data, user_data) -> None:
+        self._select_entry(user_data)
+
+    def _selected_entry(self) -> RunEntry | None:
+        if self._selected_key is None:
+            return None
+        return self._snapshot.entry(self._selected_key)
+
+    def _select_entry(self, key: str) -> None:
+        entry = self._snapshot.entry(key)
+        if entry is None:
+            return
+        self._selected_key = key
+        self._selected_run = entry.run
+        self._selected_step = None
+        self._quote = None
+        self._show_run_detail(entry)
+        dpg.set_value("step_text", "Select a step in the DAG")
+        self._rebuild_dag(entry.run, highlight=self._current_matches(entry.run))
+        self._render_run_table()
+        self._update_action_state()
+
+    def _update_action_state(self) -> None:
+        entry = self._selected_entry()
+        run = entry.run if entry else None
+        writable = bool(self._snapshot.writable and entry is not None and entry.path is not None)
+        can_pause = bool(writable and run and run.status == RunStatus.running)
+        can_resume = bool(writable and run and run.status == RunStatus.paused)
+        can_fork = bool(writable and run and self._selected_step)
+        can_diff = bool(run and any(e.key != self._selected_key for e in self._entries))
+        for tag, enabled in (
+            ("menu_pause", can_pause),
+            ("btn_pause", can_pause),
+            ("btn_pause_wrap", can_pause),
+            ("menu_resume", can_resume),
+            ("btn_resume", can_resume),
+            ("btn_resume_wrap", can_resume),
+            ("menu_fork", can_fork),
+            ("menu_fork_branch", can_fork),
+            ("btn_fork", can_fork),
+            ("btn_fork_wrap", can_fork),
+            ("menu_transcript", run is not None),
+            ("menu_pricing", run is not None),
+            ("menu_export_otel", run is not None and otelio.export_available()),
+            ("menu_import", self._snapshot.writable and otelio.import_available()),
+            ("menu_refs", self._snapshot.kind == "repository"),
+            ("menu_diff", can_diff),
+            ("btn_diff", can_diff),
+            ("btn_diff_wrap", can_diff),
+            ("btn_copy_run", run is not None),
+            ("btn_copy_run_wrap", run is not None),
+            ("btn_copy_run_detail", run is not None),
+            ("btn_copy_run_detail_wrap", run is not None),
+            ("btn_expand_run", run is not None),
+            ("btn_expand_run_wrap", run is not None),
+            ("btn_copy_step", self._selected_step is not None),
+            ("btn_copy_step_wrap", self._selected_step is not None),
+            ("btn_copy_step_detail", self._selected_step is not None),
+            ("btn_copy_step_detail_wrap", self._selected_step is not None),
+            ("btn_expand_step", self._selected_step is not None),
+            ("btn_expand_step_wrap", self._selected_step is not None),
+        ):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, enabled=enabled)
+
+    # -------------------------------------------------------------- rendering
+
+    def _show_run_detail(self, entry: RunEntry) -> None:
+        run = entry.run
+        extra: list[str] = []
+        if entry.location:
+            extra.append(f"Stored: {_oneline(entry.location)}")
+        if entry.refs:
+            extra.append(f"Repository refs: {', '.join(_oneline(r) for r in entry.refs)}")
+        if entry.size:
+            extra.append(f"File: {_format_bytes(entry.size)}")
+        if self._quote is not None and self._quote_key == entry.key:
+            extra.extend(pricing.quote_lines(self._quote, limit=4))
+        lines = _run_detail_lines(
+            run,
+            trust=(
+                _trust_lines(entry.path, config=self._trust)
+                if entry.path
+                else self._repo_trust_lines()
+            ),
+            extra=extra,
+        )
+        dpg.set_value("detail_text", _sanitize("\n".join(lines)))
+
+    def _repo_trust_lines(self) -> list[str]:
+        """A v3 run's trust story is the store's, not a file's."""
+        return [
+            "Integrity: every object in a v3 repository is content-addressed and "
+            "verified on read",
+            "Signature: v3 attestations are not read by this console "
+            "(use `tine fsck` / `tine attest`)",
+        ]
+
+    def _show_step_detail(self, step: Step) -> None:
+        dpg.set_value("step_text", _sanitize("\n".join(_step_detail_lines(step))))
+
+    def _clear_dag(self) -> None:
+        # Links (slot 0) must go before nodes (slot 1): deleting a node that a
+        # live link still references segfaults Dear PyGui's native layer.
+        for link in dpg.get_item_children("dag_editor", slot=0) or []:
+            dpg.delete_item(link)
+        for child in dpg.get_item_children("dag_editor", slot=1) or []:
+            dpg.delete_item(child)
+        self._node_ids.clear()
+        if dpg.does_item_exist("dag_summary"):
+            dpg.set_value("dag_summary", "Select a run to inspect its opentine step graph.")
+
+    def _dag_avail_width(self) -> int:
+        if dpg.does_item_exist("panel_dag"):
+            w = dpg.get_item_rect_size("panel_dag")[0]
+            if w > _px(100):
+                return int(w) - _px(40)
+        vw = dpg.get_viewport_client_width()
+        left = center = 0
+        if dpg.does_item_exist("panel_runs"):
+            left = dpg.get_item_configuration("panel_runs")["width"]
+        if dpg.does_item_exist("panel_detail"):
+            center = dpg.get_item_configuration("panel_detail")["width"]
+        return max(_px(260), vw - (left or _px(360)) - (center or _px(500)) - _px(80))
+
+    def _rebuild_dag(self, run: Run, highlight: set[str] | None = None) -> None:
+        highlight = highlight or set()
+        self._clear_dag()
+        summary = (
+            _dag_summary(run, self._step_filter, highlight)
+            if self._step_filter
+            else _dag_summary(run)
+        )
+        steps = run.steps
+        if len(steps) > MAX_DAG_NODES:
+            steps = steps[:MAX_DAG_NODES]
+            summary += f" - drawing the first {MAX_DAG_NODES} step(s)"
+        dpg.set_value("dag_summary", summary)
+        drawn = {step.id for step in steps}
+        in_attr: dict[str, int] = {}
+        out_attr: dict[str, int] = {}
+        depth = _step_depths(run)
+        # Wrap depth columns into horizontal bands sized to the visible panel,
+        # so whole graphs stay on screen instead of running off to the right.
+        rows_at_depth: dict[int, int] = {}
+        for step in steps:
+            rows_at_depth[depth.get(step.id, 0)] = rows_at_depth.get(depth.get(step.id, 0), 0) + 1
+        max_depth = max(rows_at_depth, default=0)
+        pitch_x, pitch_y = _px(NODE_PITCH_X), _px(NODE_PITCH_Y)
+        cols = max(1, self._dag_avail_width() // pitch_x)
+        # Bucket depths by band once. Rescanning every depth for every band is
+        # quadratic, and a legal run can hold thousands of steps.
+        depths_by_band: dict[int, list[int]] = {}
+        for d in rows_at_depth:
+            depths_by_band.setdefault(d // cols, []).append(d)
+        band_y: dict[int, int] = {}
+        y_cursor = _px(20)
+        for band in range(max_depth // cols + 1):
+            band_y[band] = y_cursor
+            band_rows = max((rows_at_depth[d] for d in depths_by_band.get(band, ())), default=1)
+            y_cursor += band_rows * pitch_y + _px(30)
+        col_fill: dict[int, int] = {}
+        for step in steps:
+            d = depth.get(step.id, 0)
+            row = col_fill.get(d, 0)
+            col_fill[d] = row + 1
+            band, cx = divmod(d, cols)
+            pos = [_px(20) + cx * pitch_x, band_y.get(band, _px(20)) + row * pitch_y]
+            color = STEP_COLORS.get(step.kind, TEXT_PRIMARY)
+            is_match = step.id in highlight
+            node_id = dpg.add_node(
+                parent="dag_editor",
+                label=_node_label(step, highlighted=is_match),
+                pos=pos,
+                user_data=step.id,
+            )
+            dpg.bind_item_theme(node_id, _node_theme(color, highlighted=is_match))
+            self._node_ids[step.id] = node_id
+
+            in_id = dpg.add_node_attribute(parent=node_id, attribute_type=dpg.mvNode_Attr_Input)
+            dpg.add_text("in", parent=in_id)
+            in_attr[step.id] = in_id
+
+            static_id = dpg.add_node_attribute(
+                parent=node_id, attribute_type=dpg.mvNode_Attr_Static
+            )
+            dpg.add_text(_node_subtitle(step), parent=static_id)
+            dpg.add_button(
+                label="inspect",
+                parent=static_id,
+                user_data=step.id,
+                callback=self._on_step_open,
+                width=_px(80),
+            )
+
+            out_id = dpg.add_node_attribute(parent=node_id, attribute_type=dpg.mvNode_Attr_Output)
+            dpg.add_text("out", parent=out_id)
+            out_attr[step.id] = out_id
+
+        for step in steps:
+            if step.id not in in_attr:
+                continue
+            for parent_id in step.parent_ids:
+                if parent_id in out_attr:
+                    link = dpg.add_node_link(
+                        out_attr[parent_id], in_attr[step.id], parent="dag_editor"
+                    )
+                    dpg.bind_item_theme(link, _link_theme("parent"))
+        for cause, effect in causal_edges(run):
+            if cause in out_attr and effect in in_attr and cause in drawn and effect in drawn:
+                link = dpg.add_node_link(out_attr[cause], in_attr[effect], parent="dag_editor")
+                dpg.bind_item_theme(link, _link_theme("causal"))
+
+    def _on_step_open(self, sender, app_data, user_data) -> None:
+        if not self._selected_run:
+            return
+        step = self._selected_run.get_step(user_data)
+        if step:
+            self._selected_step = step
+            self._show_step_detail(step)
+            self._update_action_state()
+
+    def _on_link_created(self, sender, app_data) -> None:
+        # A read-only picture of a recorded graph: dragging an edge cannot mean
+        # anything, so say so rather than silently doing nothing.
+        self._set_status("The step graph is a recording; it cannot be edited here")
+
+    def _on_link_deleted(self, sender, app_data) -> None:
+        self._set_status("The step graph is a recording; it cannot be edited here")
+
+    def _fit_dag(self) -> None:
+        """Scroll the editor back to the top-left, where the roots are drawn."""
+        try:
+            dpg.set_x_scroll("dag_editor", 0.0)
+            dpg.set_y_scroll("dag_editor", 0.0)
+        except Exception:
+            pass
+
+    def _focus_next_match(self) -> None:
+        """Select the next highlighted step and scroll the editor onto it."""
+        run = self._selected_run
+        if run is None:
+            self._set_status("Select a run first")
+            return
+        matches = _matching_steps(run, self._step_filter)
+        if not matches:
+            self._set_status("No matching steps to jump to")
+            return
+        current = self._selected_step.id if self._selected_step else None
+        index = (matches.index(current) + 1) % len(matches) if current in matches else 0
+        self._reveal_step(matches[index])
+
+    def _reveal_step(self, step_id: str) -> None:
+        run = self._selected_run
+        if run is None:
+            return
+        step = run.get_step(step_id)
+        if step is None:
+            self._set_status("That step is not in this run")
+            return
+        self._selected_step = step
+        self._show_step_detail(step)
+        self._update_action_state()
+        node = self._node_ids.get(step.id)
+        if node is not None:
+            try:
+                dpg.clear_selected_nodes("dag_editor")
+                position = dpg.get_item_pos(node)
+                dpg.set_x_scroll("dag_editor", max(0.0, float(position[0]) - _px(120)))
+                dpg.set_y_scroll("dag_editor", max(0.0, float(position[1]) - _px(120)))
+            except Exception:
+                pass
+
+    # ----------------------------------------------------------------- filters
+
+    def _current_matches(self, run: Run) -> set[str]:
+        if not self._step_filter:
+            return set()
+        return set(_matching_steps(run, self._step_filter))
+
+    def _on_filter_change(self, sender, app_data) -> None:
+        self._run_filter = (app_data or "").strip().lower()
+        self._preferences["last_filter"] = self._run_filter
+        self._touch_preferences()
+        self._filter_dirty_at = time.monotonic()
+
+    def _clear_run_filter(self) -> None:
+        if dpg.does_item_exist("run_filter"):
+            dpg.set_value("run_filter", "")
+        self._on_filter_change(None, "")
+
+    def _on_step_filter_change(self, sender, app_data) -> None:
+        self._step_filter = (app_data or "").strip().lower()
+        run = self._selected_run
+        matches = _matching_steps(run, self._step_filter) if run else []
+        if run and dpg.does_item_exist("dag_summary"):
+            dpg.set_value("dag_summary", _dag_summary(run, self._step_filter, set(matches)))
+        if run:
+            self._rebuild_dag(run, highlight=set(matches))
+        if self._step_filter:
+            if run:
+                self._set_status(_highlight_summary(run, set(matches)))
+            else:
+                self._set_status("Select a run to highlight its steps")
+
+    def _clear_step_filter(self) -> None:
+        self._step_filter = ""
+        if dpg.does_item_exist("step_filter"):
+            dpg.set_value("step_filter", "")
+        if self._selected_run:
+            if dpg.does_item_exist("dag_summary"):
+                dpg.set_value("dag_summary", _dag_summary(self._selected_run))
+            self._rebuild_dag(self._selected_run)
+
+    # ------------------------------------------------------------- clipboard
+
+    def _copy_to_clipboard(self, value: str, label: str) -> None:
+        try:
+            dpg.set_clipboard_text(value)
+        except Exception as e:
+            self._note("warn", f"Could not copy {label}: {e}")
+            return
+        self._set_status(f"Copied {label}: {_truncate(value, 60)}")
+
+    def _copy_run_id(self) -> None:
+        if self._selected_run is None:
+            self._set_status("Select a run first")
+            return
+        self._copy_to_clipboard(str(self._selected_run.id), "run id")
+
+    def _copy_step_id(self) -> None:
+        if self._selected_step is None:
+            self._set_status("Select a step first")
+            return
+        self._copy_to_clipboard(str(self._selected_step.id), "step id")
+
+    def _copy_run_detail(self) -> None:
+        if not dpg.does_item_exist("detail_text"):
+            return
+        self._copy_to_clipboard(str(dpg.get_value("detail_text")), "run inspector")
+
+    def _copy_step_detail(self) -> None:
+        if not dpg.does_item_exist("step_text"):
+            return
+        self._copy_to_clipboard(str(dpg.get_value("step_text")), "step inspector")
+
+    def _expand_run_detail(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self._set_status("Select a run first")
+            return
+        run = entry.run
+        body = [
+            *_run_detail_lines(
+                run,
+                trust=(
+                _trust_lines(entry.path, config=self._trust)
+                if entry.path
+                else self._repo_trust_lines()
+            ),
+            ),
+            "",
+            "Prompt (full):",
+            *_indent_block(run.user_prompt or ""),
+        ]
+        if run.system_prompt:
+            body.extend(["", "System prompt (full):", *_indent_block(run.system_prompt)])
+        self._show_text(f"Run {_truncate(run.id, 40)}", "\n".join(body))
+
+    def _expand_step_detail(self) -> None:
+        step = self._selected_step
+        if step is None:
+            self._set_status("Select a step first")
+            return
+        body = [
+            *_step_detail_lines(step),
+            "",
+            "Inputs (full):",
+            *_indent_block(_format_value(step.inputs, 200_000)),
+            "",
+            "Outputs (full):",
+            *_indent_block(_format_value(step.outputs, 200_000)),
+        ]
+        self._show_text(f"Step {_truncate(step.id, 40)}", "\n".join(body))
+
+    # ------------------------------------------------------------ text viewer
+
+    def _build_text_dialog(self) -> None:
+        """A read-only, selectable, copyable view of anything too long to inline.
+
+        Dear PyGui has no selectable text widget, so a multiline input in
+        read-only mode is the way a user gets to keep a prompt, a payload or a
+        diff. It is never a way to edit an artifact: nothing reads its value.
+        """
+        with dpg.window(
+            label="Details",
+            modal=True,
+            show=False,
+            tag="text_dialog",
+            width=_px(TEXT_DIALOG_SIZE[0]),
+            height=_px(TEXT_DIALOG_SIZE[1]),
+        ):
+            dpg.add_text("", tag="text_subject", color=TEXT_SECONDARY)
+            dpg.add_separator()
+            dpg.add_input_text(
+                tag="text_body",
+                multiline=True,
+                readonly=True,
+                width=-1,
+                height=-_px(44),
+                default_value="",
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Copy", width=_px(110), callback=self._copy_text_dialog)
+                dpg.add_button(
+                    label="Close",
+                    width=_px(110),
+                    callback=lambda: dpg.configure_item("text_dialog", show=False),
+                )
+
+    def _show_text(self, subject: str, body: str) -> None:
+        dpg.set_value("text_subject", _oneline(subject))
+        # Newlines are the point of this widget, so only surrogates and control
+        # characters are scrubbed here, not line structure.
+        dpg.set_value("text_body", _sanitize(body))
+        self._center("text_dialog", TEXT_DIALOG_SIZE)
+
+    def _copy_text_dialog(self) -> None:
+        self._copy_to_clipboard(str(dpg.get_value("text_body")), "text")
+
+    def _center(self, tag: str, size: tuple[int, int]) -> None:
+        vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
+        dpg.configure_item(
+            tag,
+            show=True,
+            pos=[max(0, (vw - _px(size[0])) // 2), max(0, (vh - _px(size[1])) // 2)],
+        )
+
+    # ----------------------------------------------------------- panel dialog
+
+    def _build_panel_dialog(self) -> None:
+        """One reusable modal for the read-only panels: stats, pricing, refs."""
+        with dpg.window(
+            label="Panel",
+            modal=True,
+            show=False,
+            tag="panel_dialog",
+            width=_px(PANEL_DIALOG_SIZE[0]),
+            height=_px(PANEL_DIALOG_SIZE[1]),
+        ):
+            dpg.add_text("", tag="panel_subject", color=TEXT_SECONDARY)
+            dpg.add_separator()
+            with dpg.group(horizontal=True, tag="panel_controls"):
+                pass
+            with dpg.child_window(tag="panel_body", border=False, height=-_px(44)):
+                dpg.add_text("", tag="panel_text", wrap=_px(700), color=TEXT_SECONDARY)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Copy", width=_px(110), callback=self._copy_panel)
+                dpg.add_button(
+                    label="Close",
+                    width=_px(110),
+                    callback=lambda: dpg.configure_item("panel_dialog", show=False),
+                )
+
+    def _show_panel(self, title: str, subject: str, body: str) -> None:
+        dpg.configure_item("panel_dialog", label=title)
+        dpg.set_value("panel_subject", _oneline(subject))
+        dpg.set_value("panel_text", _sanitize(body))
+        self._center("panel_dialog", PANEL_DIALOG_SIZE)
+
+    def _copy_panel(self) -> None:
+        self._copy_to_clipboard(str(dpg.get_value("panel_text")), "panel")
+
+    def _clear_panel_controls(self) -> None:
+        for child in dpg.get_item_children("panel_controls", slot=1) or []:
+            dpg.delete_item(child)
+
+    # ---------------------------------------------------------------- confirm
+
+    def _build_confirm_dialog(self) -> None:
+        with dpg.window(
+            label="Confirm",
+            modal=True,
+            show=False,
+            tag="confirm_dialog",
+            width=_px(560),
+            height=_px(240),
+            no_resize=True,
+        ):
+            dpg.add_text("", tag="confirm_text", wrap=_px(520), color=TEXT_SECONDARY)
+            dpg.add_spacer(height=_px(8))
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Continue", width=_px(130), callback=self._confirm_accept)
+                dpg.add_button(label="Cancel", width=_px(130), callback=self._confirm_cancel)
+
+    def _ask(self, question: str, action) -> None:
+        """Confirm before something the user cannot undo from inside the app."""
+        self._confirm_action = action
+        dpg.set_value("confirm_text", _sanitize(question))
+        self._center("confirm_dialog", (560, 240))
+
+    def _confirm_cancel(self) -> None:
+        """Drop the pending action as well as the dialog, so Escape and Cancel
+        cannot leave a write armed for the next confirmation to fire."""
+        self._confirm_action = None
+        dpg.configure_item("confirm_dialog", show=False)
+
+    def _confirm_accept(self) -> None:
+        action, self._confirm_action = self._confirm_action, None
+        dpg.configure_item("confirm_dialog", show=False)
+        if action is not None:
+            action()
+
+    # ------------------------------------------------------------- directories
+
+    def _build_dir_picker(self) -> None:
+        with dpg.window(
+            label="Change runs directory",
+            modal=True,
+            show=False,
+            tag="dir_picker",
+            width=_px(620),
+            height=_px(260),
+            no_resize=True,
+        ):
+            dpg.add_text(
+                "A directory of .tine files, or an opentine v3 repository.",
+                color=TEXT_MUTED,
+                wrap=_px(580),
+            )
+            dpg.add_input_text(
+                tag="dir_picker_input",
+                default_value=_sanitize(str(self._runs_dir)),
+                width=-1,
+                on_enter=True,
+                callback=self._apply_dir,
+            )
+            dpg.add_text("Recent", color=TEXT_MUTED)
+            dpg.add_listbox(
+                _recent_dirs(self._preferences) or ["(none yet)"],
+                tag="dir_recent",
+                width=-1,
+                num_items=4,
+                callback=self._pick_recent_dir,
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Open", width=_px(110), callback=self._apply_dir)
+                dpg.add_button(
+                    label="Cancel",
+                    width=_px(110),
+                    callback=lambda: dpg.configure_item("dir_picker", show=False),
+                )
+
+    def _open_dir_picker(self) -> None:
+        dpg.set_value("dir_picker_input", _sanitize(str(self._runs_dir)))
+        dpg.configure_item("dir_recent", items=_recent_dirs(self._preferences) or ["(none yet)"])
+        self._center("dir_picker", (620, 260))
+
+    def _pick_recent_dir(self, sender, app_data) -> None:
+        if app_data and app_data != "(none yet)":
+            dpg.set_value("dir_picker_input", _sanitize(str(app_data)))
+
+    def _apply_dir(self, *_args) -> None:
+        raw = str(dpg.get_value("dir_picker_input") or "").strip()
+        if not raw:
+            self._set_status("Type a directory to open")
+            return
+        self._open_directory(Path(raw).expanduser())
+        dpg.configure_item("dir_picker", show=False)
+
+    def _open_directory(self, new_dir: Path) -> None:
+        self._runs_dir = new_dir
+        self._source = open_source(new_dir)
+        self._snapshot = Snapshot(root=new_dir)
+        self._entries = []
+        self._errors = []
+        self._run_filter = ""
+        self._step_filter = ""
+        self._selected_key = None
+        self._selected_run = None
+        self._selected_step = None
+        self._quote = None
+        if dpg.does_item_exist("run_filter"):
+            dpg.set_value("run_filter", "")
+        if dpg.does_item_exist("step_filter"):
+            dpg.set_value("step_filter", "")
+        self._preferences["last_runs_dir"] = str(new_dir)
+        self._preferences["last_filter"] = ""
+        _remember_dir(self._preferences, str(new_dir))
+        self._flush_preferences()
+        dpg.set_value("detail_text", "Select a run")
+        dpg.set_value("step_text", "Select a step in the DAG")
+        self._clear_dag()
+        self._render_run_table()
+        self._loader.retarget(self._source)
+        self._note("info", f"Opened {new_dir}")
+
+    def _touch_preferences(self) -> None:
+        self._preferences_dirty_at = time.monotonic()
+
+    def _flush_preferences(self) -> None:
+        self._preferences_dirty_at = None
+        self._preferences.setdefault("last_runs_dir", str(self._runs_dir))
+        try:
+            _save_preferences(self._preferences)
+        except OSError as e:
+            self._note("warn", f"Preferences not saved: {e}")
+
+    def _persist_preferences(self) -> None:
+        """Kept for callers that want the write to happen now, not on a timer."""
+        self._preferences["last_runs_dir"] = str(self._runs_dir)
+        self._preferences["last_filter"] = self._run_filter
+        self._flush_preferences()
+
+    # -------------------------------------------------------------- viewport
+
+    def _on_viewport_resize(self, *_args) -> None:
+        """Scale panel widths and text wraps with the viewport; keep panels visible."""
+        vw = dpg.get_viewport_client_width()
+        left = max(_px(300), min(_px(460), int(vw * 0.26)))
+        center = max(_px(380), min(_px(560), int(vw * 0.33)))
+        if dpg.does_item_exist("panel_runs"):
+            dpg.configure_item("panel_runs", width=left)
+        if dpg.does_item_exist("panel_detail"):
+            dpg.configure_item("panel_detail", width=center)
+        for tag, wrap in (
+            ("run_summary", left - _px(40)),
+            ("err_text", left - _px(28)),
+            ("detail_text", center - _px(28)),
+            ("step_text", center - _px(28)),
+            ("dag_summary", max(_px(320), vw - left - center - _px(90))),
+        ):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, wrap=wrap)
+        # Four buttons plus inter-item spacing must fit the panel's content box;
+        # no floor, or the row overflows and the last button is clipped.
+        spacing = _px(8)
+        button_w = max(_px(34), (left - _px(30) - 3 * spacing) // 4)
+        for tag in ("btn_pause", "btn_resume", "btn_fork", "btn_diff"):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, width=button_w)
+        # Inspector headers share a row with their buttons; below this the
+        # subtitle is dropped so the buttons keep their place.
+        compact = center < _px(520)
+        for tag, subtitle in (
+            ("panel_detail_subtitle", "Trace metadata"),
+            ("panel_step_subtitle", "Inputs, outputs, cost"),
+        ):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, show=not compact)
+                dpg.set_value(tag, subtitle)
+        # Only flag a rebuild when the resize actually changes the layout, and
+        # let the main loop do it — see _apply_pending_relayout.
+        cols = max(1, self._dag_avail_width() // _px(NODE_PITCH_X))
+        if left != self._layout_left or cols != self._layout_dag_cols:
+            self._relayout_pending = True
+        self._layout_left = left
+        self._layout_dag_cols = cols
+
+    # ---------------------------------------------------------- write actions
+
+    def _entry_for_write(self) -> RunEntry | None:
+        """The selected row, if this console may write to where it came from."""
+        entry = self._selected_entry()
+        if entry is None:
+            self._set_status("Select a run first")
+            return None
+        if not self._snapshot.writable or entry.path is None:
+            self._note(
+                "warn",
+                "This is a v3 repository: writing here would append an object and move a "
+                "branch. Use `tine repo-fork` / `tine repo-resume` instead.",
+            )
+            return None
+        return entry
+
+    def _signature_at_risk(self, path: Path) -> str:
+        """What a re-save of this file would silently destroy, if anything.
+
+        `Run.save` recomputes `metadata.integrity` from scratch, so it drops any
+        signature block the file carried and clears the draft marker an autosave
+        checkpoint uses. Both are one-way: the console cannot re-sign, because
+        it holds no signing key.
+        """
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return ""
+        losses = []
+        signature = _verify_cached(path, stat_result, "signature", Run.verify_signature)
+        if str(signature.get("state") or "") not in ("", "unsigned"):
+            losses.append("its signature")
+        integrity = _verify_integrity_cached(path, stat_result)
+        if integrity.get("draft"):
+            losses.append("its draft/autosave marker")
+        if not losses:
+            return ""
+        return (
+            f"Saving {path.name} will drop {' and '.join(losses)}: opentine rewrites the "
+            "integrity block on every save, and this console holds no signing key.\n\n"
+            "Continue?"
+        )
+
+    def _pause_selected(self) -> None:
+        entry = self._entry_for_write()
+        if entry is None:
+            return
+        run = entry.run
+        if run.status != RunStatus.running:
+            self._set_status("Select a running run to pause")
+            return
+        path = entry.path
+        question = self._signature_at_risk(path) if path and path.exists() else ""
+        if question:
+            self._ask(question, lambda: self._do_pause(entry))
+            return
+        self._do_pause(entry)
+
+    def _do_pause(self, entry: RunEntry) -> None:
+        run, path = entry.run, entry.path
+        if path is None:
+            return
+        try:
+            if path.exists():
+                # Reload before writing: the cached snapshot can be up to one
+                # refresh interval stale, and pausing from it would truncate
+                # steps a still-running agent has since written.
+                fresh = Run.load(path)
+                if fresh.status != RunStatus.running:
+                    self._loader.request(force=True)
+                    self._note("warn", f"{run.id} is no longer running ({fresh.status.value})")
+                    return
+            else:
+                self._runs_dir.mkdir(parents=True, exist_ok=True)
+                fresh = run
+            fresh.pause(path)
+        except Exception as e:  # Run.load raises more than OSError on bad files
+            self._note("error", f"Cannot pause: {e}")
+            return
+        _forget_run(path)
+        self._loader.request(force=True)
+        self._note("ok", f"Paused {run.id}")
+
+    def _resume_selected(self) -> None:
+        entry = self._entry_for_write()
+        if entry is None:
+            return
+        if entry.run.status != RunStatus.paused:
+            self._set_status("Select a paused run to resume")
+            return
+        path = entry.path
+        question = self._signature_at_risk(path) if path and path.exists() else ""
+        if question:
+            self._ask(question, lambda: self._do_resume(entry))
+            return
+        self._do_resume(entry)
+
+    def _do_resume(self, entry: RunEntry) -> None:
+        run, path = entry.run, entry.path
+        if path is None:
+            return
+        try:
+            # Same freshness rule as pause: never flip a status another process
+            # already moved past paused (e.g. completed) since the last refresh.
+            fresh = Run.load(path)
+            if fresh.status != RunStatus.paused:
+                self._loader.request(force=True)
+                self._note("warn", f"{run.id} is no longer paused ({fresh.status.value})")
+                return
+            resumed = Run.resume(path)
+            resumed.save(path)
+        except Exception as e:
+            self._note("error", f"Cannot resume: {e}")
+            return
+        _forget_run(path)
+        self._selected_run = resumed
+        self._loader.request(force=True)
+        self._note("ok", f"Resumed {resumed.id}")
+
+    def _fork_selected(self) -> None:
+        """One-click fork onto main — the fast path."""
+        self._do_fork()
+
+    def _do_fork(
+        self, *, branch: str = "main", reason: str = "", reproducible: bool = False
+    ) -> None:
+        entry = self._entry_for_write()
+        step = self._selected_step
+        if entry is None:
+            return
+        if not step:
+            self._set_status("Select a step to fork from")
+            return
+        run = entry.run
+        reason = reason.strip()
+        if len(reason) > MAX_FORK_REASON:
+            self._note("warn", f"Fork reason must be at most {MAX_FORK_REASON} characters")
+            return
+        try:
+            source = entry.path
+            fresh = Run.load(source) if source and source.exists() else run
+            if fresh.get_step(step.id) is None:
+                self._loader.request(force=True)
+                self._note("warn", f"Step {step.id} no longer exists in {run.id}")
+                return
+            # Mirror opentine's own MCP fork: the reason enters the fork identity
+            # via intent, and is also stored as plaintext. Note the plaintext is
+            # NOT signed (opentine omits fork_reason from _SIGNED_METADATA_KEYS),
+            # which is why the inspector re-derives the intent digest to decide
+            # whether the shown reason is attested.
+            new_run = fresh.fork(
+                step.id,
+                branch=branch or "main",
+                intent={"reason": reason} if reason else None,
+                nonce="" if reproducible else None,
+            )
+            if reason:
+                new_run.metadata["fork_reason"] = reason
+            out_path = _safe_run_path(self._runs_dir, new_run.id)
+            if out_path.exists():
+                # Refuse rather than clobber, the way opentine's own CLI
+                # (_require_output_slot) and MCP fork do. A reproducible fork
+                # (nonce="") derives the same id every time, so a second one
+                # would otherwise overwrite the first — and any work done inside
+                # it — with no error. Unconditional: it also catches a
+                # hand-placed file colliding with a unique-act id.
+                self._note(
+                    "warn",
+                    f"A run already exists at {out_path.name}; uncheck "
+                    "'Reproducible id' or change the branch or reason",
+                )
+                return
+            self._runs_dir.mkdir(parents=True, exist_ok=True)
+            new_run.save(out_path)
+        except Exception as e:
+            self._note("error", f"Cannot fork: {e}")
+            return
+        kept = retained_slice(fresh, step.id)
+        # Leave the selection where it is until the rescan lists the fork, then
+        # move to it. Pointing _selected_run at a run no row matches makes the
+        # console's two ideas of "the selected run" disagree: the inspector
+        # describes one run while every action reports there is no selection.
+        self._select_after_scan = str(new_run.id)
+        self._selected_step = None
+        if dpg.does_item_exist("step_text"):
+            dpg.set_value("step_text", "Select a step in the DAG")
+        if dpg.does_item_exist("fork_dialog"):
+            dpg.configure_item("fork_dialog", show=False)
+        self._loader.request(force=True)
+        where = f" on {branch}" if branch and branch != "main" else ""
+        kept_note = f", keeping {len(kept)} step(s)" if kept is not None else ""
+        self._note("ok", f"Forked {run.id}@{step.id}{where} -> {new_run.id}{kept_note}")
+
+    def _build_fork_dialog(self) -> None:
+        with dpg.window(
+            label="Fork run",
+            modal=True,
+            show=False,
+            tag="fork_dialog",
+            width=_px(FORK_DIALOG_SIZE[0]),
+            height=_px(FORK_DIALOG_SIZE[1]),
+            no_resize=True,
+        ):
+            dpg.add_text("", tag="fork_subject", color=TEXT_SECONDARY, wrap=_px(560))
+            dpg.add_text("", tag="fork_slice", color=BRAND, wrap=_px(560))
+            dpg.add_separator()
+            dpg.add_text("Branch", color=TEXT_MUTED)
+            dpg.add_input_text(tag="fork_branch", default_value="main", width=-1)
+            dpg.add_text("Reason (optional)", color=TEXT_MUTED)
+            dpg.add_input_text(tag="fork_reason", width=-1, hint="why this fork exists")
+            dpg.add_checkbox(label="Reproducible id (no random nonce)", tag="fork_reproducible")
+            dpg.add_text(
+                "Branch and reason are part of the fork id, so two forks of one step "
+                "stay distinct runs. A reason is recorded but not signed.",
+                color=TEXT_MUTED,
+                wrap=_px(560),
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Fork", callback=self._confirm_fork, width=_px(110))
+                dpg.add_button(
+                    label="Cancel",
+                    width=_px(110),
+                    callback=lambda: dpg.configure_item("fork_dialog", show=False),
+                )
+
+    def _open_fork_dialog(self) -> None:
+        entry, step = self._selected_entry(), self._selected_step
+        if not entry or not step:
+            self._set_status("Select a step to fork from")
+            return
+        run = entry.run
+        dpg.set_value("fork_subject", _sanitize(f"Fork {run.id} at step {step.id}"))
+        kept = retained_slice(run, step.id)
+        if kept is None:
+            dpg.set_value("fork_slice", "")
+        else:
+            causal = len(kept - {s.id for s in run.ancestors(step.id)}) if kept else 0
+            note = f" ({causal} of them reached through causal edges)" if causal else ""
+            dpg.set_value("fork_slice", f"Keeps {len(kept)} of {len(run.steps)} step(s){note}")
+        dpg.set_value("fork_branch", "main")
+        dpg.set_value("fork_reason", "")
+        dpg.set_value("fork_reproducible", False)
+        self._center("fork_dialog", FORK_DIALOG_SIZE)
+
+    def _confirm_fork(self) -> None:
+        self._do_fork(
+            branch=(dpg.get_value("fork_branch") or "main").strip(),
+            reason=dpg.get_value("fork_reason") or "",
+            reproducible=bool(dpg.get_value("fork_reproducible")),
+        )
+
+    # ------------------------------------------------------------------ diff
+
+    def _build_diff_dialog(self) -> None:
+        with dpg.window(
+            label="Compare runs",
+            modal=True,
+            show=False,
+            tag="diff_dialog",
+            width=_px(DIFF_DIALOG_SIZE[0]),
+            height=_px(DIFF_DIALOG_SIZE[1]),
+        ):
+            dpg.add_text("", tag="diff_subject", color=TEXT_SECONDARY)
+            with dpg.group(horizontal=True):
+                dpg.add_listbox(
+                    [],
+                    tag="diff_candidates",
+                    width=-_px(130),
+                    num_items=6,
+                    callback=self._compare_runs,
+                )
+                with dpg.group():
+                    dpg.add_button(label="Compare", callback=self._compare_runs, width=_px(110))
+                    dpg.add_button(label="Copy", callback=self._copy_diff, width=_px(110))
+                    dpg.add_button(
+                        label="Close",
+                        width=_px(110),
+                        callback=lambda: dpg.configure_item("diff_dialog", show=False),
+                    )
+            dpg.add_separator()
+            with dpg.child_window(tag="diff_scroll", border=False):
+                dpg.add_text(
+                    "Pick a run to compare against.",
+                    tag="diff_text",
+                    wrap=_px(780),
+                    color=TEXT_SECONDARY,
+                )
+
+    def _diff_label(self, entry: RunEntry) -> str:
+        """A picker row a human can actually tell apart from the next one."""
+        run = entry.run
+        when = _format_age(entry.mtime or getattr(run, "created_at", 0.0))
+        model = _truncate(_oneline(run.model_info) or "-", 18)
+        return (
+            f"{_elide_middle(str(run.id), 22)}  {run.status.value:<9} "
+            f"{model:<18} {len(run.steps):>3} steps  {_cost_cell(run)}  {when}"
+        )
+
+    def _open_diff_dialog(self) -> None:
+        entry = self._selected_entry()
+        if not entry:
+            self._set_status("Select a run to compare")
+            return
+        others = [e for e in self._entries if e.key != entry.key]
+        if not others:
+            self._set_status("Need a second run in this source to compare")
+            return
+        self._diff_choices = {self._diff_label(e): e.key for e in others}
+        labels = list(self._diff_choices)
+        # A fork's origin is the comparison the user almost always wants.
+        origin = str(entry.run.metadata.get("forked_from") or "")
+        default = next(
+            (label for label, key in self._diff_choices.items()
+             if key == origin or str(self._snapshot.entry(key).run.id) == origin),
+            labels[0],
+        )
+        dpg.configure_item("diff_candidates", items=labels, default_value=default)
+        dpg.set_value("diff_candidates", default)
+        dpg.set_value("diff_subject", _sanitize(f"A: {entry.run.id}   - compare with:"))
+        dpg.set_value("diff_text", "Pick a run and press Compare.")
+        self._center("diff_dialog", DIFF_DIALOG_SIZE)
+
+    def _compare_runs(self, *_args) -> None:
+        entry = self._selected_entry()
+        if not entry:
+            return
+        label = dpg.get_value("diff_candidates")
+        key = self._diff_choices.get(label)
+        other = self._snapshot.entry(key) if key else None
+        if other is None:
+            dpg.set_value("diff_text", "That run is no longer loaded.")
+            return
+        try:
+            body = _format_run_diff(entry.run, other.run)
+        except Exception as e:
+            body = f"Could not diff these runs: {e}"
+        dpg.set_value("diff_text", _sanitize(body))
+
+    def _copy_diff(self) -> None:
+        self._copy_to_clipboard(str(dpg.get_value("diff_text")), "diff")
+
+    # ------------------------------------------------------------- transcript
+
+    def _build_transcript_dialog(self) -> None:
+        with dpg.window(
+            label="Transcript",
+            modal=True,
+            show=False,
+            tag="transcript_dialog",
+            width=_px(TRANSCRIPT_DIALOG_SIZE[0]),
+            height=_px(TRANSCRIPT_DIALOG_SIZE[1]),
+        ):
+            dpg.add_text("", tag="transcript_subject", color=TEXT_SECONDARY)
+            dpg.add_text("", tag="transcript_summary", color=TEXT_MUTED, wrap=_px(800))
+            dpg.add_separator()
+            dpg.add_child_window(tag="transcript_body", border=False, height=-_px(44))
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Copy all", width=_px(110), callback=self._copy_transcript)
+                dpg.add_button(
+                    label="Close",
+                    width=_px(110),
+                    callback=lambda: dpg.configure_item("transcript_dialog", show=False),
+                )
+
+    def _open_transcript(self) -> None:
+        run = self._selected_run
+        if run is None:
+            self._set_status("Select a run to read its transcript")
+            return
+        for child in dpg.get_item_children("transcript_body", slot=1) or []:
+            dpg.delete_item(child)
+        dpg.set_value("transcript_subject", _sanitize(f"Transcript of {run.id}"))
+        turns = _transcript_turns(run)
+        summary = _transcript_summary(run)
+        if len(turns) > MAX_TRANSCRIPT_TURNS:
+            summary += f" - showing the first {MAX_TRANSCRIPT_TURNS}"
+            turns = turns[:MAX_TRANSCRIPT_TURNS]
+        dpg.set_value("transcript_summary", summary)
+
+        for index, turn in enumerate(turns):
+            with dpg.group(horizontal=True, parent="transcript_body"):
+                dpg.add_text(
+                    _transcript_heading(turn),
+                    color=TRANSCRIPT_ROLE_COLORS.get(turn["role"], TEXT_SECONDARY),
+                )
+                if turn["step_id"]:
+                    # The turn knows which step it produced; jumping there is the
+                    # reason to read a transcript beside a graph rather than alone.
+                    dpg.add_button(
+                        label="show step",
+                        width=_px(84),
+                        user_data=turn["step_id"],
+                        callback=self._on_transcript_step,
+                        tag=f"transcript_step_{index}",
+                    )
+            if turn.get("reasoning"):
+                dpg.add_text(
+                    f"reasoning: {turn['reasoning']}",
+                    parent="transcript_body",
+                    wrap=_px(780),
+                    color=TEXT_FAINT,
+                )
+            dpg.add_text(
+                _truncate(turn["content"], 4000) or "(empty)",
+                parent="transcript_body",
+                wrap=_px(780),
+                color=TEXT_SECONDARY,
+            )
+            dpg.add_spacer(height=_px(6), parent="transcript_body")
+
+        self._center("transcript_dialog", TRANSCRIPT_DIALOG_SIZE)
+
+    def _copy_transcript(self) -> None:
+        run = self._selected_run
+        if run is None:
+            return
+        lines = []
+        for turn in _transcript_turns(run):
+            lines.append(_transcript_heading(turn))
+            if turn.get("reasoning"):
+                # The dialog renders this above the content; a copy that drops it
+                # pastes an empty assistant turn with its explanation removed.
+                lines.append(f"reasoning: {turn['reasoning']}")
+            lines.append(turn["content"])
+            lines.append("")
+        self._copy_to_clipboard("\n".join(lines), "transcript")
+
+    def _on_transcript_step(self, sender, app_data, user_data) -> None:
+        run = self._selected_run
+        if run is None:
+            return
+        step = run.get_step(user_data)
+        if step is None:
+            self._set_status(f"Step {user_data} is not in this run")
+            return
+        dpg.configure_item("transcript_dialog", show=False)
+        self._reveal_step(step.id)
+        self._set_status(f"Selected step {_truncate(user_data, 12)} from the transcript")
+
+    # ---------------------------------------------------------------- export
+
+    def _export_otel(self) -> None:
+        """Write the selected run as an OTLP/JSON GenAI document.
+
+        Read-only with respect to the artifact: it never rewrites the run, so it
+        cannot disturb an integrity digest or a signature.
+        """
+        entry = self._selected_entry()
+        if entry is None:
+            self._set_status("Select a run to export")
+            return
+        if not otelio.export_available():
+            self._note("warn", "OpenTelemetry export needs opentine 0.5.0 or newer")
+            return
+        run = entry.run
+        try:
+            out_path = _export_path(self._export_dir(), str(run.id))
+        except ValueError as e:
+            self._note("error", f"Cannot export: {e}")
+            return
+        if out_path.exists():
+            self._ask(
+                f"{out_path.name} already exists. Overwrite it?",
+                lambda: self._write_export(run, out_path, overwrite=True),
+            )
+            return
+        self._write_export(run, out_path, overwrite=False)
+
+    def _export_dir(self) -> Path:
+        """Where an export lands: beside the runs, or beside a repository."""
+        if self._snapshot.kind == "repository":
+            return Path(getattr(self._source, "root", self._runs_dir))
+        return self._runs_dir
+
+    def _write_export(self, run: Run, out_path: Path, *, overwrite: bool) -> None:
+        try:
+            self._export_dir().mkdir(parents=True, exist_ok=True)
+            result = otelio.write_export(
+                run,
+                out_path,
+                service_name=str(self._preferences.get("otel_service_name", "") or ""),
+                overwrite=overwrite,
+            )
+        except Exception as e:
+            self._note("error", f"Cannot export: {e}")
+            return
+        self._note(
+            "ok",
+            f"Exported {result.spans} span(s), {_format_bytes(result.bytes)} to {result.path.name}",
+        )
+
+    # ---------------------------------------------------------------- import
+
+    def _open_import_dialog(self) -> None:
+        if not self._snapshot.writable:
+            self._note(
+                "warn",
+                "Open a .tine directory to import into; a v3 repository is read-only here",
+            )
+            return
+        if not otelio.import_available():
+            self._note("warn", "Importing needs opentine 0.5.0 or newer")
+            return
+        self._clear_panel_controls()
+        dpg.add_text("File", parent="panel_controls", color=TEXT_MUTED)
+        dpg.add_input_text(
+            tag="import_path",
+            parent="panel_controls",
+            width=_px(360),
+            hint="path to an OTLP/JSON, JSONL or framework log",
+        )
+        dpg.add_combo(
+            list(otelio.IMPORT_FORMATS),
+            tag="import_format",
+            parent="panel_controls",
+            width=_px(150),
+            default_value=otelio.IMPORT_FORMATS[0],
+        )
+        dpg.add_button(
+            label="Import", parent="panel_controls", width=_px(90), callback=self._do_import
+        )
+        self._show_panel(
+            "Import a trace",
+            f"Writes a new .tine artifact into {self._runs_dir}",
+            "Choose a file exported by an OpenTelemetry collector or an agent framework.\n"
+            "The importer never modifies the file it reads, and the run it writes is an "
+            "ordinary .tine artifact this console can then open, fork and export.\n\n"
+            f"Formats: {', '.join(otelio.IMPORT_FORMATS)}\n"
+            "'auto' picks a format from the file's own content.",
+        )
+
+    def _do_import(self) -> None:
+        raw = str(dpg.get_value("import_path") or "").strip()
+        if not raw:
+            self._set_status("Type the path of a trace file to import")
+            return
+        fmt = str(dpg.get_value("import_format") or "")
+        source = Path(raw).expanduser()
+        try:
+            imported = otelio.import_file(source, fmt="" if fmt == "auto" else fmt)
+        except Exception as e:
+            self._note("error", f"Cannot import {source.name}: {e}")
+            return
+        try:
+            written = otelio.save_imported(imported, self._runs_dir)
+        except Exception as e:
+            self._note("error", f"Imported, but could not save: {e}")
+            return
+        dpg.configure_item("panel_dialog", show=False)
+        self._loader.request(force=True)
+        note = f"Imported {imported.events} event(s) from {source.name} as {written.name}"
+        self._note("ok", note)
+        for warning in imported.warnings[:5]:
+            self._note("warn", f"import: {warning}")
+
+    # --------------------------------------------------------------- pricing
+
+    def _open_pricing(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self._set_status("Select a run to price")
+            return
+        self._clear_panel_controls()
+        dpg.add_text("As of", parent="panel_controls", color=TEXT_MUTED)
+        dpg.add_input_text(
+            tag="pricing_date",
+            parent="panel_controls",
+            width=_px(120),
+            hint="yyyy-mm-dd",
+            default_value=str(self._preferences.get("pricing_as_of", "") or ""),
+        )
+        dpg.add_text("Provider", parent="panel_controls", color=TEXT_MUTED)
+        # A rate card is keyed by provider and model together, and an imported
+        # trace usually names only the model. Rather than guess a provider from
+        # the model's spelling, the reader picks one and every figure derived
+        # from that choice is labelled as assumed.
+        dpg.add_combo(
+            [RECORDED_PROVIDER, *pricing.catalog_providers()],
+            tag="pricing_provider",
+            parent="panel_controls",
+            width=_px(150),
+            default_value=str(self._preferences.get("pricing_provider", RECORDED_PROVIDER)),
+            callback=self._recompute_price,
+        )
+        dpg.add_button(
+            label="Recompute",
+            parent="panel_controls",
+            width=_px(110),
+            callback=self._recompute_price,
+        )
+        self._recompute_price()
+
+    def _recompute_price(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        as_of = ""
+        if dpg.does_item_exist("pricing_date"):
+            as_of = str(dpg.get_value("pricing_date") or "").strip()
+        assume = RECORDED_PROVIDER
+        if dpg.does_item_exist("pricing_provider"):
+            assume = str(dpg.get_value("pricing_provider") or RECORDED_PROVIDER)
+        if as_of:
+            self._preferences["pricing_as_of"] = as_of
+        self._preferences["pricing_provider"] = assume
+        self._touch_preferences()
+        try:
+            quote = pricing.quote_run(
+                entry.run,
+                effective_at=as_of or None,
+                assume_provider="" if assume == RECORDED_PROVIDER else assume,
+            )
+        except Exception as e:
+            self._show_panel("Price this run", str(entry.run.id), f"Pricing failed: {e}")
+            return
+        self._quote = quote
+        self._quote_key = entry.key
+        body = "\n".join(pricing.quote_lines(quote, limit=40))
+        if quote.available and quote.unknown and not quote.assumed_provider:
+            missing = sum(1 for step in quote.steps if not step.provider)
+            if missing:
+                body += (
+                    f"\n\n{missing} step(s) recorded no provider, and a rate card is keyed by "
+                    "provider and model together. Pick one above to price them as if it had "
+                    "served them; every figure from that choice is marked assumed."
+                )
+        self._show_panel(
+            "Price this run",
+            f"{entry.run.id} - {_recorded_phrase(entry.run)}",
+            body
+            + "\n\nRecorded cost is what the run itself claims. The figure above is what "
+            "opentine's signed catalog says the same record is worth, computed here and "
+            "never written back to the artifact.",
+        )
+        self._show_run_detail(entry)
+
+    # ------------------------------------------------------------------ views
+
+    def _open_stats(self) -> None:
+        entries = self._visible_entries()
+        if not entries:
+            self._set_status("Nothing loaded to summarise")
+            return
+        group_by = str(self._preferences.get("stats_group_by", "status") or "status")
+        self._clear_panel_controls()
+        dpg.add_text("Group by", parent="panel_controls", color=TEXT_MUTED)
+        dpg.add_combo(
+            list(stats.GROUPINGS),
+            tag="stats_group",
+            parent="panel_controls",
+            width=_px(170),
+            default_value=group_by if group_by in stats.GROUPINGS else stats.GROUPINGS[0],
+            callback=self._render_stats,
+        )
+        self._render_stats()
+
+    def _render_stats(self, *_args) -> None:
+        group_by = "status"
+        if dpg.does_item_exist("stats_group"):
+            group_by = str(dpg.get_value("stats_group"))
+        self._preferences["stats_group_by"] = group_by
+        self._touch_preferences()
+        runs = [entry.run for entry in self._visible_entries()]
+        try:
+            result = stats.rollup(runs, group_by=group_by)
+            body = "\n".join(stats.rollup_lines(result, limit=25))
+        except Exception as e:
+            body = f"Could not summarise these runs: {e}"
+        scope = "filtered" if self._run_filter else "all"
+        self._show_panel(
+            "Statistics",
+            f"{len(runs)} {scope} run(s) in {self._source.label}",
+            body,
+        )
+
+    def _open_refs(self) -> None:
+        if self._snapshot.kind != "repository":
+            self._set_status("Refs are a v3 repository concept; this is a .tine directory")
+            return
+        self._clear_panel_controls()
+        groups: dict[str, list[str]] = {}
+        for name, oid in sorted(self._snapshot.refs.items()):
+            head = str(name).split("/", 1)[0]
+            groups.setdefault(head, []).append(f"  {_oneline(name)}  ->  {_short_oid(str(oid))}")
+        lines: list[str] = []
+        for head in sorted(groups):
+            lines.append(f"{head} ({len(groups[head])})")
+            lines.extend(groups[head])
+            lines.append("")
+        if self._snapshot.shallow:
+            lines.append("This clone is shallow: history, diffs and context slices are truncated.")
+        self._show_panel(
+            "Repository refs",
+            f"{self._source.label} - {len(self._snapshot.refs)} ref(s), "
+            f"{len(self._entries)} run(s)",
+            "\n".join(lines) or "This repository has no refs yet.",
+        )
+
+    # ------------------------------------------------------------- help/about
+
+    def _build_help_dialog(self) -> None:
+        with dpg.window(
+            label="Help",
+            modal=True,
+            show=False,
+            tag="help_dialog",
+            width=_px(720),
+            height=_px(560),
+        ):
+            dpg.add_text("", tag="help_text", wrap=_px(680), color=TEXT_SECONDARY)
+            dpg.add_separator()
+            dpg.add_button(
+                label="Close",
+                width=_px(110),
+                callback=lambda: dpg.configure_item("help_dialog", show=False),
+            )
+
+    def _open_help(self) -> None:
+        command = "Cmd" if sys.platform == "darwin" else "Ctrl"
+        dpg.set_value(
+            "help_text",
+            "\n".join(
+                [
+                    "Keyboard",
+                    "  Up / Down        move through the visible run list",
+                    f"  {command}+F           focus the run search",
+                    f"  {command}+C           copy the selected run id",
+                    f"  {command}+R           reload the source now",
+                    f"  {command}+O           change the runs directory",
+                    "  F1               this help",
+                    "  Esc              close a dialog, else clear the DAG filter, else the search",
+                    "",
+                    "Search",
+                    "  Plain words are a substring search across ids, prompts, tags, metadata,",
+                    "  step payloads and recorded providers.",
+                    "  A field prefix switches to opentine's own grammar, the same one",
+                    "  `tine ls` and `tine search` accept:",
+                    "    status:failed  model:opus  tag:bug  cost:>0.01  cost:0.01..1",
+                    "    after:2026-07-01  before:2026-08-01  text:retry",
+                    "",
+                    "The graph",
+                    "  Grey links are execution lineage (parent -> child).",
+                    "  Purple links are causal edges: a step that was required but is not a",
+                    "  parent. A fork keeps those too, which is why they are drawn.",
+                    "  'Next match' selects and scrolls to the next highlighted step.",
+                    "",
+                    "Sources",
+                    "  A directory of .tine files can be paused, resumed and forked.",
+                    "  An opentine v3 repository opens read-only: writing into one would",
+                    "  append an object and move a branch, so those actions stay disabled.",
+                    "",
+                    "Trust",
+                    "  Integrity covers the artifact body, not its metadata.",
+                    "  A signature covers what its scheme says it covers; the panel names it.",
+                    f"  Set {trust.HMAC_KEY_ENV} or {trust.PUBLIC_KEY_ENV} to verify"
+                    " signatures here.",
+                ]
+            ),
+        )
+        self._center("help_dialog", (720, 560))
+
+    def _open_about(self) -> None:
+        lines = [
+            f"opentine-gui {_GUI_VERSION}",
+            f"opentine {_OPENTINE_VERSION}",
+            f"Dear PyGui {_dearpygui_version()}",
+            f"Python {sys.version.split()[0]} on {sys.platform}",
+            "",
+            f"Preferences: {_preferences_path()}",
+            f"Source: {self._source.label}",
+            f"Signing key: {self._trust.source or 'none configured'}",
+            "",
+            "Reads opentine .tine artifacts (format v2, v1 auto-migrated) and",
+            "opentine v3 repositories, read-only.",
+        ]
+        self._show_panel("About", "opentine run console", "\n".join(lines))
 
 
-def _format_version_line(run: Run) -> str:
-    migration = run.metadata.get("migration")
-    if isinstance(migration, list) and migration:
-        first = migration[0] if isinstance(migration[0], dict) else {}
-        last = migration[-1] if isinstance(migration[-1], dict) else {}
-        origin = first.get("from", "?")
-        tool = last.get("tool", "?")
-        return f"Format: v{run.format_version} (migrated from v{origin} by {tool})"
-    return f"Format: v{run.format_version}"
+def _recorded_phrase(run: Run) -> str:
+    """How to say what the artifact itself claims about cost, in one clause."""
+    recorded = _cost_text(run)
+    if recorded == "no cost recorded":
+        return "nothing was priced at capture"
+    return f"recorded {recorded}"
 
 
-def _format_compact(value: object, limit: int) -> str:
-    """Single-line rendering — diff rows stay scannable where pretty-printing would not."""
-    if isinstance(value, str):
-        return _truncate(value, limit)
+def _dearpygui_version() -> str:
     try:
-        rendered = json.dumps(value, sort_keys=True, separators=(", ", ": "))
-    except TypeError:
-        rendered = str(value)
-    return _truncate(rendered, limit)
-
-
-def _format_counts(counts: dict[str, int]) -> str:
-    if not counts:
-        return "(none)"
-    return ", ".join(f"{kind} {count}" for kind, count in sorted(counts.items()))
-
-
-def _format_timestamp(timestamp: float) -> str:
-    if not timestamp:
-        return "(unknown)"
-    try:
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-    except (OverflowError, OSError, ValueError):
-        return f"(invalid timestamp: {timestamp!r})"
-
-
-def _sanitize(s: str) -> str:
-    """Replace lone surrogates: Dear PyGui's native text renderer segfaults on them."""
-    if s.isascii():
-        return s
-    return s.encode("utf-8", "replace").decode("utf-8")
-
-
-#: Line breaks and other C0/C1 controls, which would let artifact text open a new
-#: row in a panel that is rendered as one flat block of text.
-_LINE_BREAKS = re.compile(r"[\r\n\x0b\x0c\x85  ]+")
-_CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f-\x9f]")
-
-
-def _oneline(value: object) -> str:
-    """Collapse untrusted text to a single line.
-
-    The run and step inspectors render as one flat text widget, so a newline in
-    an artifact-supplied field (a model name, a tag, a prompt) would start a new
-    row that is pixel-identical to the console's own — including the
-    Integrity/Signature/Fork-id lines that state whether the artifact is
-    trustworthy. Every interpolated artifact value goes through here so those
-    verdicts cannot be forged by the file they describe.
-    """
-    text = _LINE_BREAKS.sub(" ", _sanitize(str(value)))
-    return _CONTROLS.sub("", text.replace("\t", " ")).strip()
-
-
-def _indent_block(text: str, prefix: str = "  ") -> list[str]:
-    """Render possibly multi-line text with every line indented under a heading."""
-    cleaned = _CONTROLS.sub("", _sanitize(str(text)).replace("\t", " "))
-    return [f"{prefix}{line}" for line in _LINE_BREAKS.split(cleaned)] or [f"{prefix}"]
-
-
-def _elide_middle(text: str, n: int) -> str:
-    """Shorten keeping both ends, so ids sharing a prefix stay distinguishable.
-
-    Run ids are commonly "demo-complete"/"demo-running" or a shared hash prefix;
-    truncating only the tail renders them all identically.
-    """
-    text = _sanitize(str(text))
-    if len(text) <= n:
-        return text
-    if n <= 3:
-        return text[:n]
-    keep = n - 1  # one char for the ellipsis
-    head = (keep + 1) // 2
-    return f"{text[:head]}…{text[len(text) - (keep - head):]}"
-
-
-def _truncate(v: object, n: int) -> str:
-    s = _sanitize(str(v))
-    return s if len(s) <= n else s[: n - 3] + "..."
+        return str(dpg.get_dearpygui_version())
+    except Exception:
+        return "unknown"
 
 
 def run_app(runs_dir: Path | str | None = None) -> None:

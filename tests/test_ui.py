@@ -259,18 +259,22 @@ def test_the_table_holds_one_row_per_visible_run(tmp_path: Path, gui_factory, fa
     assert sorted(_row_ids(fake_dpg)) == ["alpha", "beta", "gamma"]
 
 
-def test_a_row_carries_the_id_status_model_steps_cost_and_age(
+def test_a_row_carries_the_id_status_steps_cost_and_age(
     tmp_path: Path, gui_factory, fake_dpg
 ) -> None:
+    # Five columns, not six. A sixth elided every header to "Stat…"/"A…" in a
+    # sidebar this wide; the model is in the run inspector and in the row's own
+    # tooltip, which is where it earns its space.
     _write(tmp_path, _priced_run("beta", cost=0.25))
-    gui_factory(tmp_path)
-    run_id, status, model, steps, cost, age = _cells(fake_dpg, _row_for(fake_dpg, "beta"))
+    gui = gui_factory(tmp_path)
+    run_id, status, steps, cost, age = _cells(fake_dpg, _row_for(fake_dpg, "beta"))
     assert run_id == "beta"
     assert status == "running"
-    assert model == "claude-sonnet-4"
     assert steps == "2"
     assert cost == "$0.2500"
     assert age  # a formatted age, whatever the clock says
+    entry = gui._snapshot.entry("beta")
+    assert "claude-sonnet-4" in gui._row_tooltip(entry)
 
 
 def test_a_run_nothing_priced_shows_a_dash_rather_than_a_zero_cost(
@@ -280,7 +284,7 @@ def test_a_run_nothing_priced_shows_a_dash_rather_than_a_zero_cost(
     # an imported trace records no cost at all.
     _write(tmp_path, _run("alpha"))
     gui_factory(tmp_path)
-    assert _cells(fake_dpg, _row_for(fake_dpg, "alpha"))[4] == "-"
+    assert _cells(fake_dpg, _row_for(fake_dpg, "alpha"))[3] == "-"
 
 
 def test_only_the_selected_row_is_marked_selected(tmp_path: Path, gui_factory, fake_dpg) -> None:

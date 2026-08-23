@@ -183,7 +183,8 @@ FILTER_DEBOUNCE_SECONDS = 0.15
 #: rather than on every character.
 PREFERENCES_FLUSH_SECONDS = 1.5
 
-TABLE_COLUMNS = ("id", "status", "model", "steps", "cost", "age")
+#: The run table's columns, in order, keyed the way the sort callback names them.
+TABLE_COLUMNS = ("id", "status", "steps", "cost", "age")
 
 #: The pricing panel's "use what the artifact recorded" option, as opposed to
 #: assuming a provider for steps that recorded none.
@@ -753,11 +754,13 @@ class OpentineGUI:
                 _action_button("Fork", self._fork_selected, "btn_fork")
                 _action_button("Diff", self._open_diff_dialog, "btn_diff")
             dpg.add_separator()
-            # `resizable` and `hideable` are not decoration: Dear PyGui ignores
-            # `configure_item(column, show=...)` entirely, so the only way a
-            # reader can trade one column for another in a narrow sidebar is the
-            # table's own header menu. `Age` starts hidden for the same reason —
-            # it is the least load-bearing column, and the row tooltip has it.
+            # Five columns, not six: the sidebar is ~380dp of content and a
+            # header elided to "Stat…" is worse than no header at all. Model is
+            # the one that loses, because the run inspector and the row tooltip
+            # both carry it. `resizable`/`hideable` matter because Dear PyGui
+            # ignores `configure_item(column, show=...)` and `default_hide`
+            # entirely, so the header menu is the only way a reader can trade
+            # one column for another.
             with dpg.table(
                 header_row=True,
                 borders_innerH=True,
@@ -772,14 +775,11 @@ class OpentineGUI:
                 policy=dpg.mvTable_SizingStretchProp,
                 tag="run_table",
             ):
-                dpg.add_table_column(label="Run", tag="col_id", init_width_or_weight=2.2)
-                dpg.add_table_column(label="State", tag="col_status", init_width_or_weight=1.2)
-                dpg.add_table_column(label="Model", tag="col_model", init_width_or_weight=1.7)
-                dpg.add_table_column(label="Steps", tag="col_steps", init_width_or_weight=0.7)
-                dpg.add_table_column(label="Cost", tag="col_cost", init_width_or_weight=1.2)
-                dpg.add_table_column(
-                    label="Age", tag="col_age", init_width_or_weight=0.7, default_hide=True
-                )
+                dpg.add_table_column(label="Run", tag="col_id", init_width_or_weight=2.4)
+                dpg.add_table_column(label="State", tag="col_status", init_width_or_weight=1.3)
+                dpg.add_table_column(label="Steps", tag="col_steps", init_width_or_weight=0.9)
+                dpg.add_table_column(label="Cost", tag="col_cost", init_width_or_weight=1.3)
+                dpg.add_table_column(label="Age", tag="col_age", init_width_or_weight=0.8)
             dpg.add_separator()
             dpg.add_text("Load errors", color=ACCENT_ORANGE, tag="err_header", show=False)
             dpg.add_text("", tag="err_text", wrap=_px(312), color=ACCENT_ORANGE)
@@ -1313,14 +1313,13 @@ class OpentineGUI:
                 dpg.add_text(
                     run.status.value, color=RUN_STATUS_COLORS.get(run.status, TEXT_PRIMARY)
                 )
-                dpg.add_text(_truncate(_oneline(run.model_info) or "-", 22))
                 dpg.add_text(str(len(run.steps)))
                 dpg.add_text(_cost_cell(run))
                 dpg.add_text(_format_age(entry.mtime or getattr(run, "created_at", 0.0)))
         if len(visible) > len(shown):
             with dpg.table_row(parent="run_table"):
                 dpg.add_text(f"...{len(visible) - len(shown)} more not shown", color=TEXT_MUTED)
-                for _ in range(5):
+                for _ in range(len(TABLE_COLUMNS) - 1):
                     dpg.add_text("")
         dpg.set_value(
             "run_summary",
@@ -1339,7 +1338,7 @@ class OpentineGUI:
                 else:
                     msg = "No .tine runs here yet"
                 dpg.add_text(msg, color=TEXT_MUTED)
-                for _ in range(5):
+                for _ in range(len(TABLE_COLUMNS) - 1):
                     dpg.add_text("")
 
     def _row_tooltip(self, entry: RunEntry) -> str:

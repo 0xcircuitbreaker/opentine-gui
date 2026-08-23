@@ -11,6 +11,8 @@ than it showed. Preview and result have to agree, so both kinds are modelled.
 
 from __future__ import annotations
 
+import weakref
+
 from opentine.core import Run, Step, StepKind
 
 from opentine_gui.text import _format_value, _oneline, _sanitize, _truncate
@@ -58,6 +60,10 @@ def step_causal_ids(step: Step) -> list[str]:
 
 
 def causal_edges(run: Run) -> list[tuple[str, str]]:
+    return _view(run, "causal_edges", _read_causal_edges)
+
+
+def _read_causal_edges(run: Run) -> list[tuple[str, str]]:
     """(cause, effect) pairs inside this run, dangling and duplicate edges dropped.
 
     A causal edge may name an event that lives in another run — the v3 store is
@@ -110,6 +116,10 @@ def retained_slice(run: Run, step_id: str) -> set[str] | None:
 
 
 def _step_depths(run: Run) -> dict[str, int]:
+    return _view(run, "depths", _read_step_depths)
+
+
+def _read_step_depths(run: Run) -> dict[str, int]:
     """Longest-path depth per step, iterative so 1000+-step chains don't overflow.
 
     Both edge classes constrain the layout: a causal ancestor drawn to the right
@@ -242,10 +252,46 @@ def _step_matches_filter(step: Step, query: str) -> bool:
     return query in _step_search_text(step)
 
 
+#: Derived views of one run's graph, built once per run object: the depth map,
+#: the causal edge list and the per-step search text. Each walks every step, and
+#: the panels ask for them repeatedly — the layout, the graph summary, the run
+#: inspector and the filter all want the same answer about the same run. A `Run`
+#: is hashable and weak-referenceable; a `Step` is neither.
+_GRAPH_VIEWS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _view(run: Run, name: str, compute):
+    """`compute(run)` once per run object, or straight through if it cannot be cached."""
+    try:
+        cached = _GRAPH_VIEWS.get(run)
+    except TypeError:
+        return compute(run)
+    if cached is None:
+        cached = {}
+        try:
+            _GRAPH_VIEWS[run] = cached
+        except TypeError:
+            return compute(run)
+    if name not in cached:
+        cached[name] = compute(run)
+    return cached[name]
+
+
+def _run_step_texts(run: Run) -> dict[str, str]:
+    return _view(
+        run, "step_texts", lambda r: {step.id: _step_search_text(step) for step in r.steps}
+    )
+
+
 def _matching_steps(run: Run | None, query: str) -> list[str]:
     if not run or not query:
         return []
-    return [step.id for step in run.steps if _step_matches_filter(step, query)]
+    texts = _run_step_texts(run)
+    return [
+        step.id
+        for step in run.steps
+        if query in texts.get(step.id, "") or _step_matches_filter(step, query)
+    ]
 
 
 def run_providers(run: Run) -> dict[str, int]:

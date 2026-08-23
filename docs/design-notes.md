@@ -83,6 +83,13 @@ that queue between frames. The rule that keeps this safe is absolute: **the
 worker never touches Dear PyGui**. It returns plain data — runs, errors, paths —
 and every widget call happens on the render thread.
 
+The worker also pays the trust checks. `load_runs` always warmed the integrity
+digest, but the signature verdict and the signature scheme were first computed
+in the frame that drew a run, and each re-parses the whole artifact: 0.9 s on a
+5 MB file, on the render thread, per click. They are cached per file revision
+either way, so the loader spends a bounded few seconds computing them up front
+and the click costs nothing.
+
 Two caches make repeat scans cheap. Parsed runs are keyed by file revision
 (path, mtime, ctime, size, inode), which is the same key the verification cache
 uses, so an unchanged file is parsed once. v3 objects are content-addressed, so
@@ -91,7 +98,16 @@ clearing wholesale: a full clear at the cap makes a directory holding more
 revisions than the cap re-do all its work on every pass, which is precisely the
 busy directory the cache exists for.
 
-The selected run's graph is rebuilt only when that run's own bytes change.
+Derived views of a run — its depth map, its causal edges, its per-step search
+text, its total cost, its cost breakdown — are memoised per run object, because
+the panels ask the same question about the same run several times per render.
+The one that mattered most was the per-step search text: the design notes
+already recorded caching the *run* search text for the same reason, and leaving
+the step-level equivalent uncached cost 1.6 s per DAG-filter keystroke on a
+15,000-step run. Both filters are debounced.
+
+The selected run's graph is rebuilt only when that run's own bytes change, and
+the run table is redrawn only when what it would draw changed.
 Rebuilding resets pan, zoom, node positions and node selection, and a directory
 where one agent is writing changes its directory-wide signature every couple of
 seconds — so the old behaviour threw the user's view away while they were

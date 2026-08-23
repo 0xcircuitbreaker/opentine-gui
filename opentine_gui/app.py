@@ -172,6 +172,10 @@ MAX_TRANSCRIPT_TURNS = 500
 #: Messages kept in the log panel. Old ones scroll off, they do not vanish
 #: behind the next auto-refresh the way a single status line does.
 MAX_MESSAGES = 200
+#: How long one scan may spend pre-computing trust verdicts before handing the
+#: snapshot over. The work is cached per file revision either way; this only
+#: decides how much of it the loader does up front.
+TRUST_WARM_SECONDS = 3.0
 #: A filter keystroke should not re-scan every payload of every run.
 FILTER_DEBOUNCE_SECONDS = 0.15
 #: Preferences are written to disk, so they are flushed on a pause in typing
@@ -414,8 +418,12 @@ class _Loader:
     queue that the render thread drains.
     """
 
-    def __init__(self, source, interval: float = AUTO_REFRESH_SECONDS) -> None:
+    def __init__(self, source, interval: float = AUTO_REFRESH_SECONDS, warm=None) -> None:
         self.source = source
+        #: Optional post-scan work, run on the worker with the snapshot it just
+        #: produced. Used to pay the trust checks here rather than in the frame
+        #: that first draws a run.
+        self.warm = warm
         self.interval = interval
         self.results: queue.Queue = queue.Queue()
         self._wake = threading.Event()
@@ -478,6 +486,11 @@ class _Loader:
                     root=getattr(source, "root", Path(".")),
                     errors=[f"scan failed: {e}"],
                 )
+            if self.warm is not None:
+                try:
+                    self.warm(snapshot)
+                except Exception:
+                    pass  # warming is an optimisation; never a reason to lose a scan
             self._last_signature = snapshot.signature or signature
             self.results.put(snapshot)
 
@@ -516,8 +529,9 @@ class OpentineGUI:
         self._pending_select: str | None = None
         self._messages: list[_Message] = []
         self._trust = trust.load_trust_config(self._preferences)
-        self._loader = _Loader(self._source)
+        self._loader = _Loader(self._source, warm=self._warm_trust)
         self._filter_dirty_at: float | None = None
+        self._step_filter_dirty_at: float | None = None
         self._preferences_dirty_at: float | None = None
         self._node_ids: dict[str, int | str] = {}
         #: What the table last drew, and which revision of the selected run the
@@ -527,6 +541,10 @@ class OpentineGUI:
         #: None until the table has been drawn once. An empty directory has an
         #: empty state, and treating "nothing yet" as "same as last time" left
         #: the empty-state row undrawn.
+        #: Bumped whenever a new snapshot is applied, so the filtered-and-sorted
+        #: view can be memoised without keying on a list's identity.
+        self._snapshot_serial = 0
+        self._visible_cache: tuple | None = None
         self._table_fingerprint: tuple | None = None
         self._graph_fingerprint: tuple = ()
         self._quote: pricing.RunQuote | None = None
@@ -1075,6 +1093,10 @@ class OpentineGUI:
                 self._set_status(
                     f"{self._source.label} - {shown}/{len(self._entries)} run(s) shown"
                 )
+        stepping = self._step_filter_dirty_at
+        if stepping is not None and now - stepping >= FILTER_DEBOUNCE_SECONDS:
+            self._step_filter_dirty_at = None
+            self._apply_step_filter()
         if (
             self._preferences_dirty_at is not None
             and now - self._preferences_dirty_at >= PREFERENCES_FLUSH_SECONDS
@@ -1082,6 +1104,31 @@ class OpentineGUI:
             self._flush_preferences()
 
     # ---------------------------------------------------------------- refresh
+
+    def _warm_trust(self, snapshot: Snapshot) -> None:
+        """Compute each artifact's trust verdicts on the loader thread.
+
+        `load_runs` already warms the integrity digest, but the signature verdict
+        and the signature scheme were first computed lazily in the frame that
+        drew a run — and each re-parses the whole artifact, which is 0.9 s on a
+        5 MB file, on the render thread, per click. They are cached per file
+        revision, so paying them here costs the same work in a place where it
+        does not stall the console.
+
+        Bounded by time rather than by count: a directory of small runs warms
+        entirely, and a directory of enormous ones warms what it can and leaves
+        the rest to be paid on selection.
+        """
+        deadline = time.monotonic() + TRUST_WARM_SECONDS
+        for entry in snapshot.entries:
+            if entry.path is None:
+                continue
+            if time.monotonic() > deadline:
+                return
+            try:
+                _trust_lines(entry.path, config=self._trust)
+            except Exception:
+                continue
 
     def _apply_snapshot(self) -> None:
         snapshot = self._loader.drain()
@@ -1094,6 +1141,8 @@ class OpentineGUI:
         self._snapshot = snapshot
         self._entries = snapshot.entries
         self._errors = snapshot.errors
+        self._snapshot_serial += 1
+        self._visible_cache = None
         selected = self._selected_key
         entry = snapshot.entry(selected) if selected else None
         if selected and entry is None:
@@ -1189,8 +1238,23 @@ class OpentineGUI:
         return _trust_lines(entry.path, config=self._trust)
 
     def _visible_entries(self) -> list[RunEntry]:
-        entries = [e for e in self._entries if _run_matches_filter(e.run, self._run_filter)]
-        return self._sorted(entries)
+        """The rows the table would draw, filtered and sorted.
+
+        Memoised per (snapshot, filter, sort): applying one snapshot asked for
+        this four times, and each pass filters and sorts every loaded run.
+        """
+        key = (self._snapshot_serial, self._run_filter, self._sort_column, self._sort_ascending)
+        cache = self._visible_cache
+        # The third element is the list the memo was built from, compared by
+        # identity: replacing `_entries` without going through a snapshot (which
+        # is what the write actions and the tests both do) has to invalidate it.
+        if cache is not None and cache[0] == key and cache[2] is self._entries:
+            return cache[1]
+        entries = self._sorted(
+            [e for e in self._entries if _run_matches_filter(e.run, self._run_filter)]
+        )
+        self._visible_cache = (key, entries, self._entries)
+        return entries
 
     def _sorted(self, entries: list[RunEntry]) -> list[RunEntry]:
         column = self._sort_column
@@ -1327,6 +1391,7 @@ class OpentineGUI:
             self._sort_ascending = direction > 0
         except Exception:
             return
+        self._visible_cache = None
         self._preferences["sort_column"] = self._sort_column
         self._preferences["sort_ascending"] = "1" if self._sort_ascending else "0"
         self._touch_preferences()
@@ -1487,6 +1552,8 @@ class OpentineGUI:
     def _rebuild_dag(self, run: Run, highlight: set[str] | None = None) -> None:
         highlight = highlight or set()
         self._clear_dag()
+        # One summary, from the matches already in hand: computing it again here
+        # walked every step's payload a second time per keystroke.
         summary = (
             _dag_summary(run, self._step_filter, highlight)
             if self._step_filter
@@ -1641,6 +1708,7 @@ class OpentineGUI:
 
     def _on_filter_change(self, sender, app_data) -> None:
         self._run_filter = (app_data or "").strip().lower()
+        self._visible_cache = None
         self._preferences["last_filter"] = self._run_filter
         self._touch_preferences()
         self._filter_dirty_at = time.monotonic()
@@ -1651,16 +1719,22 @@ class OpentineGUI:
         self._on_filter_change(None, "")
 
     def _on_step_filter_change(self, sender, app_data) -> None:
+        # Deferred like the run filter: matching walks every step's payload and
+        # then rebuilds the graph, which is a second of work on a large run.
+        # Doing it between frames also keeps a held key from queueing several.
         self._step_filter = (app_data or "").strip().lower()
+        self._step_filter_dirty_at = time.monotonic()
+
+    def _apply_step_filter(self) -> None:
         run = self._selected_run
-        matches = _matching_steps(run, self._step_filter) if run else []
-        if run and dpg.does_item_exist("dag_summary"):
-            dpg.set_value("dag_summary", _dag_summary(run, self._step_filter, set(matches)))
+        matches = set(_matching_steps(run, self._step_filter)) if run else set()
         if run:
-            self._rebuild_dag(run, highlight=set(matches))
+            self._rebuild_dag(run, highlight=matches)
+        elif dpg.does_item_exist("dag_summary"):
+            dpg.set_value("dag_summary", "Select a run to inspect its opentine step graph.")
         if self._step_filter:
             if run:
-                self._set_status(_highlight_summary(run, set(matches)))
+                self._set_status(_highlight_summary(run, matches))
             else:
                 self._set_status("Select a run to highlight its steps")
 

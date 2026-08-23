@@ -832,6 +832,10 @@ def test_the_dag_filter_marks_the_matching_nodes(tmp_path: Path, gui_factory, fa
     gui = gui_factory(tmp_path)
     gui._select_run("alpha")
     _fire(fake_dpg, "step_filter", "grep")
+    # Deferred like the run filter: matching walks every step's payload and then
+    # rebuilds the graph, which is a second of work on a large run, so the
+    # keystroke only records the intent and the frame loop does it.
+    gui._apply_step_filter()
     labels = {step: fake_dpg.config(node)["label"] for step, node in _nodes(fake_dpg).items()}
     assert labels["s2"].startswith("* ")
     assert not labels["s1"].startswith("* ")

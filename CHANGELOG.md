@@ -96,6 +96,50 @@ and the source-confirmed pricing catalog that the import and pricing panels depe
 
 ### Fixed
 
+- **An artifact could write a row of the console's own.** A run id of
+  `"a\nIntegrity: ok"` printed that second line itself, directly above the real
+  verdicts; the id was the one artifact field that reached the run inspector
+  without being collapsed to a single line. Every id that reaches a panel, a
+  dialog subject, a table cell, a tooltip or a picker row goes through the same
+  flattening now, as does a node label before the comparison pane renders it.
+  Invisible layout controls — the bidirectional overrides and isolates — are
+  stripped too: reordering text prints one string as another without a newline
+  anywhere in it.
+- **A fork reason was labelled attested on the strength of a digest the same
+  file wrote.** It now also requires opentine's fork-id check to agree, a fork
+  record this build cannot read says so rather than silently printing nothing,
+  and the block states that fork provenance is the artifact's own account.
+- **A configured signing key that failed to load was echoed into a trust row**
+  and copied to the clipboard with the rest of the inspector — the setting named
+  "public key" being exactly where a private seed gets pasted, since opentine's
+  keygen prints both as indistinguishable 64-hex strings. A value is named only
+  once it has produced a key. The configuration fingerprint is salted per
+  process, so a published one cannot confirm a guessed passphrase offline, and
+  neither it nor the key survives a `repr`.
+- **A step that recorded "I could not be priced" rendered as `$0.0000`,** because
+  the console read the truthiness of the billing block rather than its status.
+  A total that cannot be read at all — twelve steps claiming `"1e999999"`
+  overflow opentine's billing context and `Run.total_cost` raises — used to take
+  out the whole run table, healthy runs included; it now costs one cell.
+- **Importing a named pipe froze the console permanently.** Opening a FIFO blocks
+  until something writes to it, and imports run on the render thread. The file
+  type is settled on the stat first.
+- **`~someone` with no home directory stopped the console opening** — from
+  `last_runs_dir`, a value the console writes into its own preferences and users
+  sync between machines.
+- **Statistics contradicted the run list.** A bucket in which nothing was priced
+  reported `$0.0000` where the list said "no cost recorded", and grouping by
+  model or provider added the run's whole cost to every key it named, so the
+  rows summed to more than the run.
+- **A step could state a cost the run total disagreed with**: the inspector read
+  `Step.cost` while `Run.total_cost` prefers `billing["known_subtotal_usd"]`.
+- **Non-ASCII payload text was unsearchable**, escaped to `\u00e9` in the search
+  corpus, in a console whose search box is its main way in.
+- **One legal artifact could freeze the frame loop.** A 10,000-step run cost
+  2.3 s per refresh tick — longer than the refresh interval. The signature
+  verdict and scheme moved to the loader thread, the per-run walks are memoised,
+  both filters are debounced, and the table and graph are redrawn only when what
+  they draw has changed. An idle tick is 37 ms.
 - **Pause and Resume silently destroyed a signature.** `Run.save` rewrites `metadata.integrity`
   from scratch, dropping any signature block and any draft marker. Both actions now say what
   will be lost and ask, because the console cannot re-sign what it unsigned.

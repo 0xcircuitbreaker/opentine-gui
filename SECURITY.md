@@ -21,6 +21,14 @@ console controls, and any of which may be attacker-influenced if you open a run
 you were sent. The console is a viewer: it never executes recorded content, never
 shells out on it, and makes no network requests.
 
+It reads two shapes of store, and writes to only one of them. A directory of
+`.tine` files may be written (pause, resume, fork). An opentine v3 repository is
+opened **read-only**: writing into one would append an object and move a branch,
+so the write actions are disabled there, and the repository is attached in the
+way that creates no files — `Repo(<.tine dir>)` rather than `Repo.open(path)`,
+which would heal the layout and leave directories behind. A test asserts the
+repository tree is byte-identical before and after a scan.
+
 Two properties matter most, and both have regression tests:
 
 - **Trust verdicts cannot be forged by the artifact describing itself.** The
@@ -28,7 +36,11 @@ Two properties matter most, and both have regression tests:
   is collapsed to a single line before it is interpolated, so a newline in a model
   name or a prompt cannot open a row that impersonates one of those verdicts.
 - **Artifact content cannot escape the runs directory.** Run ids are validated
-  before they become filenames, for reads, writes and exports alike.
+  before they become filenames, for reads, writes, imports and exports alike.
+- **A verdict states its own scope.** The integrity digest excludes `metadata` and
+  a `tine-sig/1` signature excludes `tags` and `fork_reason`; the console says so
+  beside each verdict rather than letting "ok" and "verified" be read as blanket
+  claims. Trust-on-first-use renders differently from a real verification.
 
 ### What is in scope
 
@@ -38,6 +50,10 @@ Two properties matter most, and both have regression tests:
 - A crash, hang, or unbounded resource use triggered by a `.tine` file that
   opentine itself accepts.
 - Anything that causes recorded content to be executed.
+- Key material handled by the trust settings being logged, rendered, written to
+  preferences, or recoverable from the configuration fingerprint.
+- An imported trace file escaping its temporary workspace, or an import writing
+  anywhere other than the destination the console names.
 
 ### What is out of scope
 
@@ -55,7 +71,14 @@ Two properties matter most, and both have regression tests:
   also restores mtime can be served from cache until the file changes again. This
   is documented rather than fixed; a report that improves on it is welcome.
 - Denial of service that requires a file larger than `MAX_TINE_BYTES` (10 MiB),
-  which is refused before parsing.
+  which is refused before parsing, or an import file larger than the import cap.
+- **A save destroys a signature.** `Run.save` recomputes the integrity block from
+  scratch, which drops any signature and any draft marker; the console holds no
+  signing key and cannot put either back. Pause and Resume state this and ask
+  first. Performing it after confirming is the documented behaviour, not a flaw.
+- **Post-hoc pricing is a computation, not a claim about the artifact.** A price
+  produced with an assumed provider is labelled assumed, and nothing about a
+  quote is ever written back to the run.
 
 ## Supported versions
 
@@ -64,5 +87,11 @@ upgrade before reporting.
 
 | Version | Supported |
 | --- | --- |
-| 0.2.x | Yes |
-| < 0.2 | No |
+| 0.3.x | Yes |
+| < 0.3 | No |
+
+`opentine-gui` 0.3.0 requires `opentine >= 0.7.2`. Below `opentine` 0.7.1 the
+library cannot verify a `tine-sig/2` signature (a valid signature is reported as
+an error) and cannot read a step's `causal_ids` (saving a run through it erases
+them), so older combinations are not supported for reasons that are themselves
+security-relevant.

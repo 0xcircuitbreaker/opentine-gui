@@ -61,6 +61,11 @@ These are not documented anywhere obvious and each one caused a real crash:
   at load, but paths from `argv` and preferences do not pass through opentine.
 - **Item themes override the global theme**, so a scaled style var has to be
   repeated in every item theme or that widget silently ignores the display scale.
+- **A table column cannot be hidden from code.** `configure_item(column,
+  show=False)` is ignored, and `default_hide=True` does not take either — both
+  verified against Dear PyGui 2.2. So the run table carries the columns that fit
+  the narrowest sane sidebar and hands the rest to the reader through the header
+  menu (`hideable=True`), with the row tooltip carrying what no column can.
 - **`dpg.output_frame_buffer` is flaky** — it aborts intermittently under a GIL
   assertion. That affects screenshot tooling only; the app never calls it.
 
@@ -130,6 +135,24 @@ invocations it could not price), and nothing recorded at all (`no cost
 recorded`). `Run > Price this run...` then answers the real question from
 opentine's signed catalog, reporting the catalog id and hash beside the figure,
 and reporting `unknown` for any step the catalog cannot answer for.
+
+## The suite drives the console, not a mock of it
+
+Dear PyGui segfaults the interpreter when almost any of its functions is called
+without a graphics context, which is why no test may create one. That used to
+mean each test patched the two or three `dpg` functions its code path happened
+to touch, and a new call in that path took the whole run down instead of failing
+one test.
+
+`tests/fakedpg.py` is a recording stand-in with an item registry, values,
+configuration, children and callbacks, installed for *every* test by an autouse
+fixture. A test builds the whole console (`gui_factory`), fires a real callback,
+and asserts on what the widgets were told. It is a test double, not an emulator:
+it records rather than interprets, so it proves the console asks for the right
+widgets and never that Dear PyGui draws them correctly. That part is still a
+manual pass against `demo/seed.py` output, and it is worth doing — the five-
+column run table, the causal edge colour and the modal sizes were all settled by
+looking at screenshots, not at assertions.
 
 ## Layout scales, it is not fixed
 

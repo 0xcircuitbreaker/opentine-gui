@@ -1,23 +1,23 @@
 {
   "cache": {},
-  "created_at": 1787458548.5252416,
+  "created_at": 1787456868.5261376,
   "format_version": 2,
   "graph": {
     "order": [
-      "r1",
-      "r2a",
-      "r2b",
-      "r3",
-      "r4"
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+      "c5"
     ],
     "steps": {
-      "r1": {
+      "c1": {
         "cost": 0.0,
         "duration": 0.05,
         "error": {},
-        "id": "r1",
+        "id": "c1",
         "inputs": {
-          "text": "Gather two independent data sources."
+          "text": "Read the incident report."
         },
         "kind": "think",
         "model_info": "",
@@ -26,93 +26,98 @@
         "timestamp": 0.0,
         "tool_info": {}
       },
-      "r2a": {
-        "cost": 0.0003,
-        "duration": 0.9,
+      "c2": {
+        "cost": 0.0,
+        "duration": 0.2,
         "error": {},
-        "id": "r2a",
+        "id": "c2",
         "inputs": {
           "arguments": {
-            "topic": "api"
+            "path": "postmortem.md"
           },
-          "name": "fetch_docs"
+          "name": "read_file"
         },
         "kind": "tool",
         "model_info": "",
         "outputs": {
-          "pages": 12
+          "content": "root cause: retry storm"
         },
         "parent_ids": [
-          "r1"
+          "c1"
         ],
         "timestamp": 0.0,
         "tool_info": {
-          "name": "fetch_docs"
+          "name": "read_file"
         }
       },
-      "r2b": {
-        "cost": 0.0001,
-        "duration": 0.3,
+      "c3": {
+        "cost": 0.0,
+        "duration": 0.4,
         "error": {},
-        "id": "r2b",
+        "id": "c3",
         "inputs": {
           "arguments": {
-            "table": "events"
+            "window": "24h"
           },
-          "name": "db_query"
+          "name": "metrics"
         },
         "kind": "tool",
         "model_info": "",
         "outputs": {
-          "rows": 5421
+          "p99_ms": 4100
         },
         "parent_ids": [
-          "r1"
+          "c1"
         ],
         "timestamp": 0.0,
         "tool_info": {
-          "name": "db_query"
+          "name": "metrics"
         }
       },
-      "r3": {
-        "cost": 0.008,
-        "duration": 1.1,
+      "c4": {
+        "billing": {
+          "known_subtotal_usd": 0.009,
+          "status": "complete"
+        },
+        "causal_ids": [
+          "c2"
+        ],
+        "cost": 0.009,
+        "duration": 1.4,
         "error": {},
-        "id": "r3",
+        "id": "c4",
         "inputs": {
-          "text": "Merge docs + events into a timeline."
+          "text": "Write the mitigation plan."
         },
         "kind": "model",
-        "model_info": "claude-haiku-4-5-20251001",
+        "model_info": "claude-opus-5",
         "outputs": {
-          "text": "Generated 3 clusters"
+          "text": "Cap retries at 3 with jittered backoff."
         },
         "parent_ids": [
-          "r2a",
-          "r2b"
+          "c3"
         ],
         "timestamp": 0.0,
         "tool_info": {},
         "usage": {
-          "cache_read": 2100,
-          "input": 5400,
-          "output": 320,
-          "total": 7820
+          "input": 3400,
+          "output": 260,
+          "total": 3660
         }
       },
-      "r4": {
+      "c5": {
         "cost": 0.0,
         "duration": 0.05,
         "error": {},
-        "id": "r4",
+        "id": "c5",
         "inputs": {
-          "text": "Cross-reference docs with timeline\u2026"
+          "text": "Mitigation plan ready."
         },
-        "kind": "think",
+        "kind": "done",
         "model_info": "",
         "outputs": {},
         "parent_ids": [
-          "r3"
+          "c4"
         ],
         "timestamp": 0.0,
         "tool_info": {}
@@ -123,17 +128,17 @@
   "metadata": {
     "integrity": {
       "algorithm": "sha256",
-      "digest": "bdbde30d13a52bfab4637cc0e8ca744d059f157c7d0476239da281ab9882b236"
+      "digest": "be2a71d1e28ad64a7ba50acdade30dd76f0e92b9a29716ad8658b4fa6ad9c3f7"
     },
-    "model_info": "claude-sonnet-4-6",
+    "model_info": "claude-opus-5",
     "system_prompt": "",
-    "user_prompt": "Build a unified timeline from docs + events table."
+    "user_prompt": "Why did the checkout service melt down, and what do we change?"
   },
   "policies": {},
   "refs": {
-    "main": "r4"
+    "main": "c5"
   },
-  "run_id": "demo-running",
-  "status": "running",
+  "run_id": "demo-causal",
+  "status": "completed",
   "transcript": []
 }

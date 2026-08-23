@@ -1,6 +1,6 @@
 {
   "cache": {},
-  "created_at": 1787455068.525118,
+  "created_at": 1787455068.555788,
   "format_version": 2,
   "graph": {
     "order": [
@@ -99,7 +99,14 @@
   "metadata": {
     "integrity": {
       "algorithm": "sha256",
-      "digest": "f7e1568a0ec7743265530d64902a979ebb11c442d3c026d3454f033b9f803f0f"
+      "digest": "4506503655fc29a1dc11a90da6f9cc8eb909592ee366bb18a55675940fcd3ccd",
+      "signature": {
+        "alg": "hmac-sha256",
+        "key_id": "demo",
+        "scheme": "tine-sig/2",
+        "signer": "demo@opentine",
+        "value": "23b89112b76850dfd4ff5b4c84b9b038d9cdc401a041bbb12e9c9d93961cfedb"
+      }
     },
     "model_info": "claude-sonnet-4-6",
     "system_prompt": "You are a research assistant.",
@@ -109,7 +116,7 @@
   "refs": {
     "main": "s4"
   },
-  "run_id": "demo-complete",
+  "run_id": "demo-signed",
   "status": "completed",
   "transcript": [
     {

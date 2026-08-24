@@ -293,6 +293,10 @@ class RunEntry:
     refs: tuple[str, ...] = ()
     size: int = 0
     mtime: float = 0.0
+    #: Identity of the bytes this row was built from: the same tuple the parse
+    #: cache keys on, so anything that re-parses the file also re-renders it.
+    #: For a repository run the object id already is that identity.
+    revision: tuple = ()
 
     @property
     def id(self) -> str:
@@ -455,10 +459,12 @@ class DirectorySource:
         for run in runs:
             path = paths.get(run.id)
             size = mtime = 0
+            revision: tuple = ()
             if path is not None:
                 try:
                     st = path.stat()
                     size, mtime = st.st_size, st.st_mtime
+                    revision = _cache_key(path, st, "run")
                 except OSError:
                     pass
             entries.append(
@@ -469,6 +475,7 @@ class DirectorySource:
                     location=path.name if path else "",
                     size=size,
                     mtime=mtime,
+                    revision=revision,
                 )
             )
         return Snapshot(
@@ -600,6 +607,7 @@ class RepositorySource:
                     location=_short_oid(oid),
                     refs=tuple(sorted(by_run.get(oid, ()))),
                     mtime=float(getattr(run, "created_at", 0.0) or 0.0),
+                    revision=(oid,),
                 )
             )
         entries.sort(key=lambda e: e.mtime, reverse=True)
@@ -626,10 +634,16 @@ _REPO_RUN_CACHE_MAX = 256
 
 
 def _load_repo_run(repo, oid: str) -> Run:
-    hit = _REPO_RUN_CACHE.get(oid)
+    # Keyed by (store, oid), not by oid alone. Content addressing makes an oid a
+    # permanent name for its *bytes*, which is why this cache never expires —
+    # but it says nothing about which store holds them, and a second repository
+    # naming the same oid was being served the first one's run under a trust row
+    # that says every object is verified on read.
+    key = (str(getattr(repo, "path", "")), oid)
+    hit = _REPO_RUN_CACHE.get(key)
     if hit is not None:
         return hit
-    return _remember(_REPO_RUN_CACHE, oid, repo.load_run(oid), _REPO_RUN_CACHE_MAX)
+    return _remember(_REPO_RUN_CACHE, key, repo.load_run(oid), _REPO_RUN_CACHE_MAX)
 
 
 def _run_oids(repo) -> tuple[list[str], str]:

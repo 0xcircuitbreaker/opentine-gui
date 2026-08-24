@@ -34,7 +34,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from opentine_gui.graphmodel import step_provider
+from opentine_gui.graphmodel import step_cost, step_provider
 from opentine_gui.text import _format_counts, _format_timestamp, _oneline, _truncate
 
 #: The groupings the console offers, in the order a chooser should list them.
@@ -367,6 +367,7 @@ def _grouping(group_by: object) -> str:
 def _keys(
     group_by: str,
     *,
+    unattributed: bool = False,
     status: str,
     format_version: str,
     created_at: float,
@@ -391,7 +392,13 @@ def _keys(
     if group_by == "tag":
         return tags or (UNTAGGED,)
     if group_by == "provider":
-        return providers or (UNRECORDED,)
+        # `(unrecorded)` is appended, not substituted: a run where only *some*
+        # steps name a provider still spent money on the ones that do not, and
+        # without a bucket to hold it that spend left the breakdown while
+        # staying in the header.
+        if not providers:
+            return (UNRECORDED,)
+        return (*providers, UNRECORDED) if unattributed else providers
     return models or (NONE_KEY,)
 
 
@@ -419,6 +426,13 @@ def _facts(run: Any, group_by: str) -> _Facts | None:
     models = _models(run, steps)
     keys = _keys(
         group_by,
+        # Whether any *billable* step went without a provider, which is what
+        # decides whether the residue bucket has to exist.
+        unattributed=any(
+            not _text(step_provider(step)) and _text(_attr(_attr(step, "kind", ""), "value", ""))
+            == "model"
+            for step in steps
+        ),
         status=status,
         format_version=version,
         created_at=created,
@@ -464,7 +478,10 @@ def _split_cost(
     else:
         for step in steps:
             provider = _text(step_provider(step)) or UNRECORDED
-            value = _number(_attr(step, "cost", 0.0)) or 0.0
+            # `step_cost`, not the bare field: `Run.total_cost` prefers
+            # billing["known_subtotal_usd"], so reading `cost` made every
+            # provider bucket $0.0000 under a non-zero headline.
+            value = _number(step_cost(step)) or 0.0
             per_key[provider] = per_key.get(provider, 0.0) + value
     # Any key the split did not answer for contributes nothing rather than the
     # whole run: a bucket that cannot be attributed is not a bucket that spent.
@@ -494,7 +511,13 @@ def _nothing_priced(run: Any, steps: list[Any], cost: float) -> bool:
         return False
 
 
-def _bucket(label: str, group: list[_Facts]) -> Bucket:
+def _bucket(label: str, group: list[_Facts], *, total: bool = False) -> Bucket:
+    """One aggregate row. `total` sums each run once rather than per key.
+
+    Without the flag the total row looked its own label up in each run's
+    per-key split, so a run naming a model or provider literally "all"
+    contributed that key's share to the headline instead of its whole cost.
+    """
     counted = [facts.tokens for facts in group if facts.tokens is not None]
     timed = [facts.duration for facts in group if facts.duration is not None]
     priced = [facts for facts in group if not facts.unrecorded]
@@ -507,7 +530,13 @@ def _bucket(label: str, group: list[_Facts]) -> Bucket:
         # last place if they are accumulated pairwise. None when nothing in the
         # bucket was ever priced: absent is not zero, which is the rule this
         # module exists to keep.
-        cost=math.fsum(facts.costs.get(label, facts.cost) for facts in group) if priced else None,
+        cost=(
+            math.fsum(
+                facts.cost if total else facts.costs.get(label, facts.cost) for facts in group
+            )
+            if priced
+            else None
+        ),
         cost_partial=any(facts.partial for facts in group)
         or bool(priced and len(priced) != len(group)),
         tokens=sum(counted) if counted else None,
@@ -553,7 +582,7 @@ def rollup(runs: Iterable[Any], *, group_by: str = "status") -> Rollup:
     # putting it last is the honest place for an unanswerable row.
     buckets.sort(key=lambda bucket: (-(bucket.cost or 0.0), -bucket.runs, bucket.label))
     return Rollup(
-        total=_bucket("all", everything),
+        total=_bucket("all", everything, total=True),
         buckets=tuple(buckets),
         group_by=grouping,
         statuses=_histogram(facts.status for facts in everything),

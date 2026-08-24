@@ -48,7 +48,15 @@ def step_provider(step: Step) -> str:
                 return _oneline(recorded)
         card = billing.get("rate_card_id")
         if isinstance(card, str) and ":" in card:
-            return _oneline(card.split(":", 1)[0])
+            head, _, rest = card.partition(":")
+            if head == "override":
+                # `bill(..., unmetered=True)` and every rate_override mint
+                # "override:<provider>:<model>" (billing/service.py), so the
+                # first segment there names the shape of the card, not who
+                # served the call — and unmetered is what all thirteen of
+                # 0.8.0's local servers record.
+                head = rest.partition(":")[0]
+            return _oneline(head)
     return ""
 
 
@@ -233,13 +241,16 @@ def step_cost(step: Step) -> float:
     if isinstance(billing, dict) and "known_subtotal_usd" in billing:
         try:
             value = float(billing["known_subtotal_usd"])
-        except (TypeError, ValueError, OverflowError):
+        except (ArithmeticError, TypeError, ValueError):
             value = None
         if value is not None and math.isfinite(value) and value >= 0:
             return value
     try:
-        return float(step.cost)
-    except (TypeError, ValueError, OverflowError):
+        # getattr, not attribute access: this reads whatever a decoded artifact
+        # handed us, which is not always a Step — the statistics rollup passes
+        # the same objects and has its own tolerance for shapes without a cost.
+        return float(getattr(step, "cost", 0.0) or 0.0)
+    except (ArithmeticError, TypeError, ValueError):
         return 0.0
 
 
@@ -317,15 +328,33 @@ def _matching_steps(run: Run | None, query: str) -> list[str]:
     ]
 
 
+#: What the provider histogram calls the model calls that named none. The same
+#: label the statistics rollup uses, because the two are read side by side.
+UNRECORDED_PROVIDER = "(unrecorded)"
+
+
 def run_providers(run: Run) -> dict[str, int]:
-    """How many steps each recorded provider served."""
+    """How many model calls each recorded provider served.
+
+    Model steps only, and the ones that named nobody are counted too: a
+    histogram that silently drops them adds up to fewer calls than the run made,
+    and the reader has no way to see that it did.
+    """
     counts: dict[str, int] = {}
     try:
         steps = run.steps
     except Exception:
         return counts
     for step in steps:
-        provider = step_provider(step)
-        if provider:
-            counts[provider] = counts.get(provider, 0) + 1
-    return counts
+        try:
+            if getattr(step.kind, "value", step.kind) != "model":
+                continue
+        except Exception:
+            continue
+        name = step_provider(step) or UNRECORDED_PROVIDER
+        counts[name] = counts.get(name, 0) + 1
+    # A run where nothing named a provider has no histogram to draw, only an
+    # absence the cost lines already report. The residue is counted only beside
+    # providers that *were* recorded, where leaving it out would make the
+    # numbers add up to fewer calls than the run made.
+    return {} if set(counts) <= {UNRECORDED_PROVIDER} else counts

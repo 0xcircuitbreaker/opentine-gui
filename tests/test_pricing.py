@@ -431,7 +431,10 @@ def test_quote_lines_render_one_line_per_row_and_cap_the_breakdown() -> None:
 
     lines = pricing.quote_lines(quote, limit=1)
     assert all(isinstance(line, str) and "\n" not in line for line in lines)
-    assert lines[0].startswith(f"Post-hoc price (catalog {quote.catalog_hash[:12]}")
+    # The heading names whether the catalog was signed: opentine requires a
+    # signature only on its own bundled one, and an unsigned overlay layered
+    # over it wins the lookup.
+    assert lines[0].startswith(f"Post-hoc price (signed catalog {quote.catalog_hash[:12]}")
     assert any("total" in line and "$" in line for line in lines)
     assert any("unknown" in line for line in lines)
 

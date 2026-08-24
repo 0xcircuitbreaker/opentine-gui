@@ -563,6 +563,7 @@ class OpentineGUI:
         self._loader = _Loader(self._source, warm=self._warm_trust)
         self._filter_dirty_at: float | None = None
         self._step_filter_dirty_at: float | None = None
+        self._step_rendered: tuple | None = None
         self._preferences_dirty_at: float | None = None
         self._node_ids: dict[str, int | str] = {}
         #: What the table last drew, and which revision of the selected run the
@@ -1219,27 +1220,40 @@ class OpentineGUI:
             self._selected_key = None
             self._selected_run = None
             self._selected_step = None
+            self._step_rendered = None
             dpg.set_value("detail_text", "Select a run")
             dpg.set_value("step_text", "Select a step in the DAG")
             self._clear_dag()
         elif entry is not None:
             self._selected_run = entry.run
-            self._show_run_detail(entry)
             # Keyed on the file revision rather than on object identity: the run
             # cache hands back the same object for an unchanged file only while
             # it holds it, so past its cap identity alone rebuilt every graph on
-            # every tick.
-            fingerprint = (entry.key, entry.mtime, entry.size, len(entry.run.steps))
-            if fingerprint != self._graph_fingerprint:
+            # every tick. The revision comes from the same (mtime, ctime, size,
+            # inode) tuple the parse cache uses, so a same-size rewrite that
+            # restores mtime — which that key does catch — is not mistaken for
+            # the same bytes here.
+            fingerprint = (entry.key, entry.revision, len(entry.run.steps))
+            changed = fingerprint != self._graph_fingerprint
+            if changed:
                 self._graph_fingerprint = fingerprint
+                self._show_run_detail(entry)
                 self._rebuild_dag(entry.run, highlight=self._current_matches(entry.run))
             if self._selected_step is not None:
                 step = entry.run.get_step(self._selected_step.id)
-                self._selected_step = step
-                if step is not None:
-                    self._show_step_detail(step)
-                else:
+                previous, self._selected_step = self._selected_step, step
+                if step is None:
                     dpg.set_value("step_text", "That step is no longer in this run")
+                elif (
+                    step is not previous
+                    or changed
+                    or self._step_rendered != (str(step.id), fingerprint)
+                ):
+                    # Gated like the graph and the table: rendering a step means
+                    # walking its whole payload, and re-doing that for an
+                    # unchanged step on every scan tick is what turns a large
+                    # artifact into a frozen console.
+                    self._show_step_detail(step)
         pending, self._select_after_scan = self._select_after_scan, None
         if pending is not None:
             target = next((e for e in snapshot.entries if str(e.run.id) == pending), None)
@@ -1511,10 +1525,11 @@ class OpentineGUI:
         self._selected_key = key
         self._selected_run = entry.run
         self._selected_step = None
+        self._step_rendered = None
         self._quote = None
         self._show_run_detail(entry)
         dpg.set_value("step_text", "Select a step in the DAG")
-        self._graph_fingerprint = (entry.key, entry.mtime, entry.size, len(entry.run.steps))
+        self._graph_fingerprint = (entry.key, entry.revision, len(entry.run.steps))
         self._rebuild_dag(entry.run, highlight=self._current_matches(entry.run))
         self._render_run_table()
         self._update_action_state()
@@ -1602,6 +1617,9 @@ class OpentineGUI:
 
     def _show_step_detail(self, step: Step) -> None:
         dpg.set_value("step_text", self._panel_text(_step_detail_lines(step)))
+        # What the panel is currently showing, so a refresh can tell "already
+        # drawn" from "drawn for a different step, or not drawn at all".
+        self._step_rendered = (str(step.id), self._graph_fingerprint)
 
     def _show_dag_placeholder(self) -> None:
         """Swap the node editor for guidance when there is no graph to draw."""
@@ -2258,7 +2276,10 @@ class OpentineGUI:
         if not losses:
             return ""
         return (
-            f"Saving {path.name} will drop {' and '.join(losses)}.\n\n"
+            # _oneline on the name: this dialog keeps its own paragraph breaks,
+            # so a file called "…\n\nContinue?\n\nx.tine" writes a complete,
+            # reassuring message above the real warning and the armed button.
+            f"Saving {_oneline(path.name)} will drop {' and '.join(losses)}.\n\n"
             "opentine rewrites the integrity block on every save, and this console holds "
             "no signing key; a field the installed opentine cannot read is not written "
             "back at all.\n\nContinue?"
@@ -2875,10 +2896,7 @@ class OpentineGUI:
         self._show_panel(
             "Price this run",
             f"{_oneline(entry.run.id)} - {_recorded_phrase(entry.run)}",
-            body
-            + "\n\nRecorded cost is what the run itself claims. The figure above is what "
-            "opentine's signed catalog says the same record is worth, computed here and "
-            "never written back to the artifact.",
+            body + "\n\n" + _pricing_provenance(quote),
         )
         self._show_run_detail(entry)
 
@@ -3022,6 +3040,28 @@ class OpentineGUI:
             "opentine v3 repositories, read-only.",
         ]
         self._show_panel("About", "opentine run console", "\n".join(lines))
+
+
+def _pricing_provenance(quote: pricing.RunQuote) -> str:
+    """The sentence under a post-hoc figure, naming what produced it.
+
+    opentine requires a signature only on its own bundled catalog; an overlay
+    layered over it wins the lookup and is accepted unsigned, so "opentine's
+    signed catalog" is not a claim the panel can make unconditionally.
+    """
+    authority = "opentine's signed catalog" if quote.catalog_signed else "the catalog in force here"
+    caveat = (
+        ""
+        if quote.catalog_signed
+        else "\n\nThat catalog is an UNSIGNED overlay layered over opentine's signed one: a "
+        "pricing.json under the working directory, in this user's config, or named by "
+        "$TINE_PRICING_CATALOG wins the lookup and nothing vouches for its rates."
+    )
+    return (
+        "Recorded cost is what the run itself claims. The figure above is what "
+        f"{authority} says the same record is worth, computed here and never written back "
+        f"to the artifact.{caveat}"
+    )
 
 
 def _recorded_phrase(run: Run) -> str:

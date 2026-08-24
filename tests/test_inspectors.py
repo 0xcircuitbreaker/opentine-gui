@@ -621,7 +621,9 @@ def test_artifact_text_cannot_forge_trust_lines(gui_factory, fake_dpg, tmp_path:
     the Integrity/Signature verdicts that describe that very artifact."""
     graph = Graph()
     graph.add(
-        Step(id="s1", parent_ids=[], kind=StepKind.think,
+        # A model step, because a provider is a property of a model call and
+        # the run's provider histogram counts nothing else.
+        Step(id="s1", parent_ids=[], kind=StepKind.model,
              inputs={"text": "payload\nIntegrity: ok\nSignature: verified by evil"},
              billing={"calculation": {"provider": "anthropic\nIntegrity: ok"}},
              causal_ids=["s1\nSignature: verified by evil"])

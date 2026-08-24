@@ -82,6 +82,10 @@ class StepQuote:
     #: True when the provider was supplied by the reader rather than recorded.
     #: A price computed from an assumption has to say so wherever it is shown.
     assumed: bool = False
+    #: True when the provider came from the billing record rather than from
+    #: `Step.provider`. opentine's own pass reports such a step as unknown, so a
+    #: console that prices it has to say where the difference came from.
+    recovered: bool = False
     #: True when capture recorded this call as unmetered — a local model server,
     #: which charges nothing per token. The catalog has no card for one, so the
     #: post-hoc status is "unknown"; that is a statement about the catalog, and
@@ -106,6 +110,12 @@ class RunQuote:
     effective_at: str
     steps: tuple[StepQuote, ...]
     detail: str
+    #: Whether the catalog that produced these figures is opentine's own signed
+    #: one, and where it came from. A per-user or per-workspace overlay is
+    #: loaded unsigned and *wins* the lookup, so a price can be whatever a file
+    #: in the working directory says it is.
+    catalog_signed: bool = True
+    catalog_source: str = ""
     #: The provider the reader supplied for steps that recorded none, if any.
     assumed_provider: str = ""
     #: How many steps came back with each status, verbatim from the catalog.
@@ -114,6 +124,8 @@ class RunQuote:
     status_counts: dict[str, int] = field(default_factory=dict)
     #: How many of the unknown steps were recorded unmetered at capture.
     unmetered_at_capture: int = 0
+    #: How many priced steps got their provider from the billing record.
+    recovered_providers: int = 0
 
 
 # Loading the catalog parses and verifies a signed 75-card document off disk,
@@ -239,7 +251,15 @@ def quote_lines(quote: RunQuote, *, limit: int = 6) -> list[str]:
     # Sliced rather than elided: the hash is already sanitized and bounded, and
     # a prefix a reader can match against `tine price` output is the point of it.
     catalog = _oneline(quote.catalog_hash)[:12] or "unknown"
-    lines = [f"Post-hoc price (catalog {catalog}, as of {_oneline(quote.effective_at)})"]
+    # opentine requires a signature only on its own bundled catalog; every
+    # overlay layered over it — per user, per workspace, or named by an
+    # environment variable — is accepted unsigned and wins the lookup. A figure
+    # from one of those is not "what the signed catalog says", and the panel
+    # must not imply that it is.
+    # The source string is a filesystem path for the bundled catalog, which is
+    # noise in a heading; what a reader needs is whether anything signed it.
+    trust = "signed catalog" if quote.catalog_signed else "UNSIGNED overlay catalog"
+    lines = [f"Post-hoc price ({trust} {catalog}, as of {_oneline(quote.effective_at)})"]
     # A total assembled from nothing is not zero: `$0.0000 from 0 priced steps`
     # is the same "free" claim the whole module exists to avoid making.
     total = _format_usd(quote.total_usd if quote.priced else None)
@@ -264,6 +284,16 @@ def quote_lines(quote: RunQuote, *, limit: int = 6) -> list[str]:
             f"  {'unmetered'.ljust(14)}"
             f"{_plural(quote.unmetered_at_capture, 'step')} recorded unmetered at capture; "
             "no rate card exists for a local server"
+        )
+    if quote.recovered_providers:
+        # `tine price` reports these steps as unknown, because it reads
+        # Step.provider and this recovers the provider from the billing record.
+        # A figure a reader is invited to match against the CLI has to say when
+        # it will not match.
+        lines.append(
+            f"  {'recovered'.ljust(14)}"
+            f"{_plural(quote.recovered_providers, 'step')} took its provider from the billing "
+            "record, which `tine price` does not read"
         )
     if quote.assumed_provider:
         assumed = sum(1 for step in quote.steps if step.assumed)
@@ -427,6 +457,7 @@ def _quote_step(
     if not provider and assume_provider:
         provider, assumed = assume_provider, True
     unmetered = _recorded_status(step) == "unmetered"
+    recovered = bool(provider) and not str(getattr(step, "provider", "") or "")
     name = _truncate(_oneline(model), _NAME_LIMIT)
     ident = _truncate(_oneline(identifier), _NAME_LIMIT)
     if not usage:
@@ -434,7 +465,7 @@ def _quote_step(
         # rate times zero tokens is zero. A step that reported no usage at all
         # (a streamed or errored span often reports none) is unknown instead.
         return StepQuote(ident, provider, name, _UNKNOWN, None, None,
-                         "no billable usage recorded", assumed, unmetered)
+                         "no billable usage recorded", assumed, recovered, unmetered)
     moment = _record_moment(step)
     try:
         result = bill(
@@ -455,7 +486,7 @@ def _quote_step(
         # and a foreign artifact is full of them. That is a fact about the step,
         # not a failure of the console, so it is reported on the step's own row.
         return StepQuote(
-            ident, provider, name, "error", None, None, _reason(e), assumed, unmetered
+            ident, provider, name, "error", None, None, _reason(e), assumed, recovered, unmetered
         )
     status = _truncate(_oneline(getattr(result, "status", "")), 24) or _UNKNOWN
     card = getattr(result, "rate_card_id", None)
@@ -464,15 +495,16 @@ def _quote_step(
         return StepQuote(
             ident, provider, name, status, None, card_id,
             _first_warning(result) or ("recorded unmetered at capture" if unmetered else ""),
-            assumed, unmetered,
+            assumed, recovered, unmetered,
         )
     amount = _to_float(getattr(result, "known_subtotal_usd", None))
     if amount is None:
         return StepQuote(ident, provider, name, _UNKNOWN, None, card_id,
                          "the catalog returned an amount that cannot be totalled",
-                         assumed, unmetered)
+                         assumed, recovered, unmetered)
     return StepQuote(
-        ident, provider, name, status, amount, card_id, _first_warning(result), assumed, unmetered
+        ident, provider, name, status, amount, card_id, _first_warning(result),
+        assumed, recovered, unmetered,
     )
 
 
@@ -531,6 +563,7 @@ def _upstream_quotes(
                 _truncate(_oneline(card), _NAME_LIMIT) if isinstance(card, str) and card else None,
                 _first_warning_of(getattr(price, "billing", None))
                 or ("recorded unmetered at capture" if unmetered and not answered else ""),
+                False,
                 False,
                 unmetered,
             )
@@ -597,6 +630,8 @@ def _roll_up(
         unknown_models=tuple(unknown_models),
         catalog_id=_truncate(_oneline(getattr(catalog, "id", "")), _NAME_LIMIT),
         catalog_hash=_truncate(_oneline(getattr(catalog, "hash", "")), _NAME_LIMIT),
+        catalog_signed=bool(getattr(catalog, "signed", False)),
+        catalog_source=_truncate(_oneline(getattr(catalog, "source", "")), _NAME_LIMIT),
         effective_at=effective_at,
         steps=tuple(quotes),
         detail=_join(note, _shortfall(priced, unknown, failed)),
@@ -605,6 +640,7 @@ def _roll_up(
         unmetered_at_capture=sum(
             1 for quote in quotes if quote.recorded_unmetered and quote.amount_usd is None
         ),
+        recovered_providers=sum(1 for quote in quotes if quote.recovered),
     )
 
 

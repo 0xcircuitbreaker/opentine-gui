@@ -116,11 +116,25 @@ def _format_compact(value: object, limit: int) -> str:
     return _truncate(rendered, limit)
 
 
-def _mapping_lines(data: dict, *, limit: int = 700) -> list[str]:
+#: Keys of one artifact mapping the inspector will render before it starts
+#: counting instead. A step's inputs and outputs are whatever a model or a tool
+#: returned: a legal 8 MiB artifact carrying a dict of 100,000 keys built
+#: 300,000 rows in the frame that drew it, and the per-row bound above never
+#: fired because every row was short. The cap is on the number of rows, which is
+#: the thing that was unbounded.
+MAX_MAPPING_KEYS = 200
+
+
+def _mapping_lines(data: dict, *, limit: int = 700, keys: int = MAX_MAPPING_KEYS) -> list[str]:
     if not data:
         return ["  (none)"]
     lines: list[str] = []
+    shown = 0
     for key, value in data.items():
+        if shown >= keys:
+            lines.append(f"  ...and {len(data) - shown} more key(s)")
+            break
+        shown += 1
         formatted = _format_value(value, limit)
         key_text = _oneline(key)
         if "\n" in formatted:

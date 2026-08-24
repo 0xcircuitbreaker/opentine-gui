@@ -538,3 +538,29 @@ def test_a_repository_object_id_is_not_a_cache_key_on_its_own(tmp_path: Path) ->
     corrupt.write_bytes(b"not an object")
     snapshot = RepositorySource(second).scan()
     assert snapshot.entries == [] and snapshot.errors, "the second store must be read, not cached"
+
+
+def test_a_repository_object_corrupted_under_an_open_console_is_noticed(tmp_path: Path) -> None:
+    # The trust panel says every object in a repository is content-addressed and
+    # verified on read. A cache keyed by object id alone cannot keep that
+    # promise: the run stayed on screen, unchanged and unremarked, after its
+    # object had been replaced with garbage.
+    from opentine.repo import Repo
+
+    from opentine_gui.sources import RepositorySource, reset_caches
+
+    reset_caches()
+    run = Run(id="honest", status=RunStatus.completed)
+    run.add_step(StepKind.done, {"text": "the honest run"})
+    Repo.init(tmp_path).put_run(run, ref="heads/main")
+
+    source = RepositorySource(tmp_path)
+    first = source.scan()
+    assert [entry.run.steps[0].inputs["text"] for entry in first.entries] == ["the honest run"]
+
+    _, _, digest = first.entries[0].key.rpartition(":")
+    (tmp_path / ".tine" / "objects" / "run" / digest[:2] / digest[2:]).write_bytes(b"garbage")
+
+    second = source.scan()
+    assert second.entries == []
+    assert any("malformed" in error or "object" in error for error in second.errors)

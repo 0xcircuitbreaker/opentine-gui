@@ -658,13 +658,31 @@ _REPO_RUN_CACHE: dict[str, Run] = {}
 _REPO_RUN_CACHE_MAX = 256
 
 
+def _repo_object_revision(repo, oid: str) -> tuple:
+    """(mtime, size) of the file holding one object, or () if it cannot be read.
+
+    Content addressing says these bytes cannot legitimately change; the console
+    says, in the trust panel, that every object is verified on read. Watching
+    the file is what keeps the second sentence true when the first is violated —
+    which is the only interesting case, since it means corruption.
+    """
+    try:
+        path = repo._object_path(oid)
+        info = path.stat()
+        return (info.st_mtime_ns, info.st_size)
+    except Exception:
+        return ()
+
+
 def _load_repo_run(repo, oid: str) -> Run:
-    # Keyed by (store, oid), not by oid alone. Content addressing makes an oid a
-    # permanent name for its *bytes*, which is why this cache never expires —
-    # but it says nothing about which store holds them, and a second repository
-    # naming the same oid was being served the first one's run under a trust row
-    # that says every object is verified on read.
-    key = (str(getattr(repo, "path", "")), oid)
+    # Keyed by (store, oid, object revision), not by oid alone. Content
+    # addressing makes an oid a permanent name for its *bytes*, which is why
+    # this cache does not expire on time — but the oid says nothing about which
+    # store holds them, and it cannot notice the store's copy being corrupted
+    # under an open console. A second repository naming the same oid was being
+    # served the first one's run, under a trust row that says every object is
+    # verified on read.
+    key = (str(getattr(repo, "path", "")), oid, _repo_object_revision(repo, oid))
     hit = _REPO_RUN_CACHE.get(key)
     if hit is not None:
         return hit

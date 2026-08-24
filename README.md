@@ -24,18 +24,17 @@ uv sync
 uv run tine-gui
 ```
 
-Requires Python 3.11+ and [`opentine`](https://github.com/0xcircuitbreaker/opentine) **0.7.2 or
-newer**, which `pip` installs for you; the lock file and CI test against 0.8.0. That floor is a
-correctness requirement, not a preference: opentine below 0.7.1 cannot read a step's
-`causal_ids` (so saving a run through an older library silently erases the causal edges a
-v3-derived run carries) and cannot verify a `tine-sig/2` signature (so it reports a valid
-signature as an error, which reads as tampering).
+Requires Python 3.11+ and [`opentine`](https://github.com/0xcircuitbreaker/opentine) **0.8.0 or
+newer**, which `pip` installs for you. That floor is a correctness requirement, not a
+preference. opentine keeps adding fields inside format v2 — `causal_ids` in 0.7.1, `provider`
+in 0.8.0 — and its reader ignores keys it does not know, so an older library loads a newer
+artifact, drops the field, and destroys it the moment anything saves the run. 0.8.0 is also
+what makes post-hoc pricing, time-of-day rate cards and the unmetered local servers readable
+at all, which is most of what the cost panels say.
 
-opentine keeps adding fields inside format v2 — `causal_ids` in 0.7.1, `provider` in 0.8.0 —
-and its reader ignores keys it does not know, so an older library loads a newer artifact and
-drops them. Rather than forbid the combination, the console checks before it writes: pause,
-resume and fork say what a save would drop and ask first. Recording a provider needs opentine
-0.8.0; the console recovers it from the billing record on artifacts written before that.
+The same problem will recur the next time opentine adds a field, so the console does not rely
+on the floor alone: pause, resume and fork read the file back, name any field this build cannot
+round-trip, and ask before writing.
 
 Runs on **Windows, macOS and Linux** — lint and the whole test suite run on all
 three in CI.
@@ -106,8 +105,13 @@ Noto Sans Mono CJK.
 - Compare any two runs — common ancestor, steps only on each side, per-field before/after
   deltas, plus the fields opentine's own diff does not compare (`provider`, `causal_ids`)
 - **Price this run** (`Run > Price this run...`) recomputes cost from the run's own record
-  against opentine's signed catalog, as of a date you choose, and reports the catalog it used.
-  An imported run that recorded no cost is reported as `unknown`, never as `$0.00`
+  against opentine's pricing catalog, as of a date you choose, and reports the catalog it used
+  and whether anything signed it — an overlay in the working directory or the user config is
+  loaded unsigned and wins the lookup. An imported run that recorded no cost is reported as
+  `unknown`, never as `$0.00`. Time-of-day rate cards (`opentine-pricing/2`) are priced at the
+  window each step actually ran in, so the figure matches `tine price` on both sides of a peak
+  window, and a step recorded unmetered — every one of opentine 0.8.0's local model servers —
+  is counted apart from a step nothing could price
 - **Statistics** (`View > Statistics...`) — a `tine stats`-shaped rollup over what is loaded:
   run and step counts, cost total/mean/max, distinct models, grouped by model, status, tag,
   day, format version or provider. Figures that were never collected read `-`, never `0`

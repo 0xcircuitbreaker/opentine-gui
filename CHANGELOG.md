@@ -2,20 +2,19 @@
 
 All notable changes to opentine-gui are documented here.
 
-## [0.3.0] - 2026-08-23
+## [0.3.0] - 2026-08-24
 
-Targets **opentine 0.7.2**, three releases on from the 0.4.0/0.5.0 this console was written
+Targets **opentine 0.8.0**, four releases on from the 0.4.0/0.5.0 this console was written
 against. Two of those releases changed what a reader has to do to be honest about an artifact,
 so this is a correctness release before it is a feature release: on the old floor the console
 erased causal edges whenever it saved a run, reported valid signatures as errors, and printed
 `$0.0000` for runs that had never been priced at all.
 
-**Requires `opentine >= 0.7.2`** (`< 0.9`), and is tested against 0.8.0, which the lock pins.
-0.7.1 is the strict correctness line — `causal_ids` round-tripping and `tine-sig/2`
-verification — and 0.7.2 adds the OpenTelemetry cost round trip and the source-confirmed
-pricing catalog that the import and pricing panels depend on. opentine 0.8.0 adds
-`Step.provider`, which the console displays and, on older artifacts, recovers from the billing
-record.
+**Requires `opentine >= 0.8.0`** (`< 0.9`). Each release below that floor is missing a field
+this console reads and writes back, and opentine's reader ignores keys it does not know: 0.7.1
+added `causal_ids`, the edges a fork actually follows, and 0.8.0 added `provider`, half of the
+`(provider, model, usage)` record that post-hoc pricing is a function of. 0.8.0 is also what
+makes `tine price`, time-of-day rate cards and the unmetered local servers readable at all.
 
 ### Added
 
@@ -96,6 +95,23 @@ record.
 - `app.py` was split into modules — `text`, `desktop`, `theme`, `sources`, `graphmodel`,
   `query`, `inspectors`, `pricing`, `otelio`, `stats`, `trust` — leaving only Dear PyGui work
   in the app. The old names are re-exported.
+
+### Added since the 0.7.2 draft of this release
+
+- **Time-of-day pricing.** `opentine-pricing/2` rate cards carry peak/off-peak windows chosen
+  by the instant a step ran. The console's own pricing pass billed without that instant, so a
+  scheduled card priced at its base rate — for DeepSeek V4 the off-peak one, so a run inside
+  the peak window reported half what it cost. It agrees with `tine price` on both sides of a
+  window now, including on the path that recovers a provider from a pre-0.8.0 billing record.
+- **Unmetered local servers.** opentine 0.8.0 made thirteen of them nameable, and they charge
+  nothing per token. A run served by one reads `$0.0000 (unmetered)` rather than a bare zero;
+  the pricing panel counts steps that were unmetered at capture apart from steps nothing could
+  price, since no catalog carries a rate card for a local server.
+- **Catalog provenance.** opentine requires a signature only on its own bundled catalog: an
+  overlay in the working directory, the user config, or named by `$TINE_PRICING_CATALOG` is
+  loaded unsigned and wins the lookup. The panel says which kind produced the figure, and a
+  price that came from a provider recovered out of a billing record is marked, because
+  `tine price` reads `Step.provider` only and will disagree.
 
 ### Fixed
 
@@ -216,6 +232,23 @@ reads 0.4.0 and 0.5.0 artifacts identically.
 - `demo/seed.py` seeds both fork shapes — a legacy lineage-only artifact and a genuine
   0.4.0 fork with a recorded, verifiable basis.
 
+### Added since the 0.7.2 draft of this release
+
+- **Time-of-day pricing.** `opentine-pricing/2` rate cards carry peak/off-peak windows chosen
+  by the instant a step ran. The console's own pricing pass billed without that instant, so a
+  scheduled card priced at its base rate — for DeepSeek V4 the off-peak one, so a run inside
+  the peak window reported half what it cost. It agrees with `tine price` on both sides of a
+  window now, including on the path that recovers a provider from a pre-0.8.0 billing record.
+- **Unmetered local servers.** opentine 0.8.0 made thirteen of them nameable, and they charge
+  nothing per token. A run served by one reads `$0.0000 (unmetered)` rather than a bare zero;
+  the pricing panel counts steps that were unmetered at capture apart from steps nothing could
+  price, since no catalog carries a rate card for a local server.
+- **Catalog provenance.** opentine requires a signature only on its own bundled catalog: an
+  overlay in the working directory, the user config, or named by `$TINE_PRICING_CATALOG` is
+  loaded unsigned and wins the lookup. The panel says which kind produced the figure, and a
+  price that came from a provider recovered out of a billing record is marked, because
+  `tine price` reads `Step.provider` only and will disagree.
+
 ### Fixed
 
 - **Forking could silently destroy an earlier fork.** A reproducible fork derives the same
@@ -260,6 +293,23 @@ reads 0.4.0 and 0.5.0 artifacts identically.
 First production-ready release. Audited and aligned against the released
 open-source [opentine 0.1.1](https://pypi.org/project/opentine/) (`.tine`
 `format_version == 1`).
+
+### Added since the 0.7.2 draft of this release
+
+- **Time-of-day pricing.** `opentine-pricing/2` rate cards carry peak/off-peak windows chosen
+  by the instant a step ran. The console's own pricing pass billed without that instant, so a
+  scheduled card priced at its base rate — for DeepSeek V4 the off-peak one, so a run inside
+  the peak window reported half what it cost. It agrees with `tine price` on both sides of a
+  window now, including on the path that recovers a provider from a pre-0.8.0 billing record.
+- **Unmetered local servers.** opentine 0.8.0 made thirteen of them nameable, and they charge
+  nothing per token. A run served by one reads `$0.0000 (unmetered)` rather than a bare zero;
+  the pricing panel counts steps that were unmetered at capture apart from steps nothing could
+  price, since no catalog carries a rate card for a local server.
+- **Catalog provenance.** opentine requires a signature only on its own bundled catalog: an
+  overlay in the working directory, the user config, or named by `$TINE_PRICING_CATALOG` is
+  loaded unsigned and wins the lookup. The panel says which kind produced the figure, and a
+  price that came from a provider recovered out of a billing record is marked, because
+  `tine price` reads `Step.provider` only and will disagree.
 
 ### Fixed
 - **Demo fixtures and seed script were written against a non-existent opentine

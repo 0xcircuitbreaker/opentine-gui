@@ -105,7 +105,15 @@ directory.
 - [x] A step with no recorded provider can be priced against a provider the
   reader picks, and every figure derived from that choice is marked assumed.
 - [x] `View > Statistics...` groups by model, status, tag, day, format version and
-  provider; a figure that was never collected renders `-` and never sums.
+  provider; a figure that was never collected renders `-` and never sums, and the
+  grouped rows add up to the headline (a step naming no provider has a bucket of
+  its own rather than leaving its spend out of the breakdown).
+- [x] A scheduled (`opentine-pricing/2`) rate card is priced at the window the
+  step actually ran in, matching `tine price` on both sides of a peak window.
+- [x] A run served by a local model server reads `$0.0000 (unmetered)`, and the
+  pricing panel counts unmetered steps apart from unpriced ones.
+- [x] The pricing panel names the catalog and whether it was signed; an unsigned
+  overlay is never presented as opentine's signed catalog.
 
 ## Interop Coverage
 
@@ -138,7 +146,8 @@ directory.
   listed in the step inspector; the fork dialog states the slice the fork will
   keep using opentine's own `retained_closure`.
 - [x] Compare reports `provider` and `causal_ids` differences, which opentine's
-  own `Run.diff` does not compare.
+  own `Run.diff` does not compare — including for two v3 repository runs, whose
+  step ids differ entirely because `provider` is inside the content address.
 
 ## Keyboard Coverage
 

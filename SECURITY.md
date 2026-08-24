@@ -85,6 +85,13 @@ Two properties matter most, and both have regression tests:
 - **Post-hoc pricing is a computation, not a claim about the artifact.** A price
   produced with an assumed provider is labelled assumed, and nothing about a
   quote is ever written back to the run.
+- **A pricing catalog is only as trustworthy as its source.** opentine requires
+  a signature on its bundled catalog and accepts every overlay layered over it
+  unsigned — under the working directory, in the user's config, or named by
+  `$TINE_PRICING_CATALOG`. The console reports which kind priced a run rather
+  than refusing the overlay, because overriding rates locally is what an overlay
+  is for. A figure from an unsigned overlay presented *as* the signed catalog's
+  would be a bug; the overlay mechanism itself is opentine's design.
 
 ## Supported versions
 

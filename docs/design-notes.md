@@ -90,7 +90,14 @@ in the frame that drew a run, and each re-parses the whole artifact: 0.9 s on a
 either way, so the loader spends a bounded few seconds computing them up front
 and the click costs nothing.
 
-Two caches make repeat scans cheap. Parsed runs are keyed by file revision
+Two caches make repeat scans cheap.
+
+A third, for v3 objects, is keyed by `(store, object id, the object file's own
+revision)`. Content addressing says an object's bytes cannot legitimately
+change, which is why the cache does not expire on time — but an id names bytes,
+not a store, and the trust row promises that every object is verified on read.
+Keying by id alone served one repository's run for another's, and kept serving a
+run whose object had been replaced with garbage under an open console. Parsed runs are keyed by file revision
 (path, mtime, ctime, size, inode), which is the same key the verification cache
 uses, so an unchanged file is parsed once. v3 objects are content-addressed, so
 their cache never needs invalidating at all. Both evict oldest-first rather than
@@ -206,6 +213,36 @@ anything super-linear in step or depth count a UI freeze:
 - Integrity and signature results are cached per file revision. The key includes
   inode and ctime, not just size and mtime, so a tampered file that restores its
   mtime is still caught on POSIX. See `SECURITY.md` for the Windows caveat.
+
+## A price is a computation, and it says whose
+
+`Run.total_cost` sums what capture recorded. `tine price` (opentine 0.8.0) asks
+a different question: what does the catalog say this record is worth *now*, or
+on a date you name. The console offers both, and keeps three things straight
+that are easy to run together:
+
+- **Which catalog.** opentine requires a signature only on its own bundled
+  catalog. An overlay under the working directory, in the user's config, or
+  named by `$TINE_PRICING_CATALOG` is loaded unsigned and *wins* the lookup, so
+  a figure can be whatever a file beside the runs says it is. The panel names
+  the catalog's hash and whether anything signed it, and the sentence under the
+  figure changes to match.
+- **Which window.** `opentine-pricing/2` cards carry peak/off-peak schedules,
+  and the window is chosen by the instant a step ran, not by the as-of date.
+  Billing without that instant priced every scheduled card at its base rate,
+  which for DeepSeek V4 is the off-peak one — a 2× error on a real card, in the
+  direction that flatters.
+- **Whose provider.** A rate card is keyed by provider *and* model. Artifacts
+  written before 0.8.0 have no `provider` field, but their adapter still wrote
+  it into the billing record, so the console recovers it there and prices runs
+  that `tine price` reports as unknown. That is a better answer and a different
+  one, so the panel says the step's provider was recovered. Where nothing
+  recorded a provider at all, the reader can supply one, and every figure from
+  that choice is labelled as assumed rather than as recorded.
+
+Zero has three meanings here and gets three sentences: priced and genuinely
+free, unmetered (a local server, which charges nothing per token — opentine
+0.8.0 made thirteen of them nameable), and never priced at all.
 
 ## Saying what a verdict covers
 

@@ -313,7 +313,14 @@ def test_an_unresolvable_tilde_path_costs_the_expansion_not_the_console() -> Non
     # `last_runs_dir` is a value the console writes into its own preferences and
     # users sync between machines; expanduser raises RuntimeError for a user with
     # no home directory, which stopped startup with a traceback.
-    assert _expand_user("~nosuchuser1234/runs") == Path("~nosuchuser1234/runs")
+    #
+    # What has to hold everywhere is that it returns a path instead of raising.
+    # Windows substitutes the profile root without checking that the user exists,
+    # so there the expansion simply succeeds; only POSIX has the failing case.
+    expanded = _expand_user("~nosuchuser1234/runs")
+    assert isinstance(expanded, Path)
+    if os.name == "posix":
+        assert expanded == Path("~nosuchuser1234/runs"), "an unresolvable ~user stays unexpanded"
 
 
 def test_preferences_are_written_through_an_unpredictable_temp_name(tmp_path: Path) -> None:
@@ -323,8 +330,11 @@ def test_preferences_are_written_through_an_unpredictable_temp_name(tmp_path: Pa
     # Nothing left behind, and nothing a watcher could have pre-planted: the
     # old name was derived from the pid.
     assert [p.name for p in tmp_path.iterdir()] == ["preferences.json"]
-    mode = stat.S_IMODE(target.stat().st_mode)
-    assert not mode & (stat.S_IRWXG | stat.S_IRWXO), oct(mode)
+    if os.name == "posix":
+        # mkstemp creates 0600. Windows has no POSIX mode bits to assert — the
+        # part that matters there is the unpredictable name, above.
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert not mode & (stat.S_IRWXG | stat.S_IRWXO), oct(mode)
 
 
 def test_a_save_that_would_drop_an_unreadable_field_says_so(tmp_path: Path) -> None:

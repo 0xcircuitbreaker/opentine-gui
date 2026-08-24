@@ -424,7 +424,10 @@ def test_a_shallow_clone_is_scanned_with_a_stated_warning(tmp_path: Path) -> Non
     oid = repo.put_run(_run("tip"), ref="heads/main").run_id
     # The on-disk shallow boundary, in the format opentine's own reader parses:
     # a real shallow clone comes from a depth-limited fetch, which needs a peer.
-    (worktree / ".tine" / "shallow").write_text(f"{oid}\n")
+    # newline="\n" because opentine's reader splits on a bare newline, and on
+    # Windows the default translation would write "\r\n" and leave every oid
+    # with a trailing carriage return that matches nothing.
+    (worktree / ".tine" / "shallow").write_text(f"{oid}\n", newline="\n")
 
     snapshot = open_source(worktree).scan()
 
@@ -481,7 +484,11 @@ def test_a_dangling_ref_does_not_stop_the_scan(tmp_path: Path) -> None:
     # there. The runs that *are* there still have to list.
     worktree = tmp_path / "project"
     Repo.init(worktree).put_run(_run("live"), ref="heads/main")
-    (worktree / ".tine" / "refs" / "heads" / "ghost").write_text(f"run:sha256:{'aa' * 32}\n")
+    # newline="\n" for the same reason the shallow file uses it: a ref is a line
+    # of text opentine parses, and only a POSIX host writes "\n" by default.
+    (worktree / ".tine" / "refs" / "heads" / "ghost").write_text(
+        f"run:sha256:{'aa' * 32}\n", newline="\n"
+    )
 
     snapshot = open_source(worktree).scan()
 
@@ -499,7 +506,11 @@ def test_a_dangling_ref_does_not_stop_the_scan(tmp_path: Path) -> None:
 def test_a_dangling_ref_is_called_out(tmp_path: Path) -> None:
     worktree = tmp_path / "project"
     Repo.init(worktree).put_run(_run("live"), ref="heads/main")
-    (worktree / ".tine" / "refs" / "heads" / "ghost").write_text(f"run:sha256:{'aa' * 32}\n")
+    # newline="\n" for the same reason the shallow file uses it: a ref is a line
+    # of text opentine parses, and only a POSIX host writes "\n" by default.
+    (worktree / ".tine" / "refs" / "heads" / "ghost").write_text(
+        f"run:sha256:{'aa' * 32}\n", newline="\n"
+    )
 
     snapshot = open_source(worktree).scan()
 
@@ -657,11 +668,15 @@ def test_a_windows_device_name_is_refused_only_on_windows(
 ) -> None:
     # "CON.tine" opens the console device rather than a file, whatever the
     # extension. Elsewhere it is an ordinary name and refusing it would make a
-    # portable artifact unreadable.
+    # portable artifact unreadable — so both halves are asserted, each with the
+    # platform forced, rather than one of them depending on the host the suite
+    # happens to run on.
+    #
+    # sources.sys *is* the stdlib module, so these patch sys.platform for the
+    # process; monkeypatch puts it back at the end of the test.
+    monkeypatch.setattr(sources.sys, "platform", "linux")
     assert _safe_run_path(tmp_path, "CON").name == "CON.tine"
 
-    # sources.sys *is* the stdlib module, so this patches sys.platform for the
-    # process; monkeypatch puts it back at the end of the test.
     monkeypatch.setattr(sources.sys, "platform", "win32")
     with pytest.raises(ValueError, match="Windows filename"):
         _safe_run_path(tmp_path, "CON")

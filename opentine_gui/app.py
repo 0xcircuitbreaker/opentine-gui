@@ -170,6 +170,11 @@ MAX_PANEL_ROW = 2000
 #: a button and a text block, so a 20,000-turn conversation would build ~60,000
 #: widgets in the frame that opens the dialog.
 MAX_TRANSCRIPT_TURNS = 500
+#: Height of the bottom strip with no messages in it (the status line alone),
+#: and with them. An empty log reserving four rows reads as a panel that failed
+#: to fill rather than as one with nothing to say.
+MESSAGE_STRIP_QUIET = 28
+MESSAGE_STRIP_OPEN = 72
 #: Messages kept in the log panel. Old ones scroll off, they do not vanish
 #: behind the next auto-refresh the way a single status line does.
 MAX_MESSAGES = 200
@@ -198,8 +203,9 @@ _LINK_THEMES: dict[str, int] = {}
 
 def _reset_theme_caches() -> None:
     """Theme ids die with their DPG context; a second run() must not reuse them."""
-    global _APP_THEME
+    global _APP_THEME, _TABLE_THEME
     _APP_THEME = None
+    _TABLE_THEME = None
     _BUTTON_THEMES.clear()
     _NODE_THEMES.clear()
     _LINK_THEMES.clear()
@@ -369,6 +375,29 @@ def _link_theme(kind: str) -> int:
                 category=dpg.mvThemeCat_Nodes,
             )
     _LINK_THEMES[kind] = theme
+    return theme
+
+
+_TABLE_THEME: int | None = None
+
+
+def _table_theme() -> int:
+    """Tighter cells for the run list.
+
+    The global cell padding is set for readable inspector rows, but a five-column
+    table pays it four times over, and every one of those pixels comes out of the
+    id column — the one column whose content the reader actually has to tell
+    apart. Nothing else in the console uses a table.
+    """
+    global _TABLE_THEME
+    if _TABLE_THEME is not None:
+        return _TABLE_THEME
+    with dpg.theme() as theme:
+        with dpg.theme_component(dpg.mvTable):
+            dpg.add_theme_style(
+                dpg.mvStyleVar_CellPadding, _px(3), _px(4), category=dpg.mvThemeCat_Core
+            )
+    _TABLE_THEME = theme
     return theme
 
 
@@ -735,11 +764,13 @@ class OpentineGUI:
         dpg.add_separator()
 
     def _build_run_list(self) -> None:
-        with dpg.child_window(width=_px(400), height=-_px(76), border=True, tag="panel_runs"):
-            _panel_header("Runs", "Search, select, and manage traces")
+        with dpg.child_window(
+            width=_px(400), height=-_px(MESSAGE_STRIP_QUIET + 14), border=True, tag="panel_runs"
+        ):
+            _panel_header("Runs", "", "panel_runs_subtitle")
             with dpg.group(horizontal=True):
                 dpg.add_input_text(
-                    hint="Search, or status:failed model:opus cost:>0.01 tag:bug",
+                    hint="Search, or status:failed model:opus tag:bug",
                     tag="run_filter",
                     default_value=self._run_filter,
                     width=-_px(52),
@@ -757,7 +788,10 @@ class OpentineGUI:
             # Five columns, not six: the sidebar is ~380dp of content and a
             # header elided to "Stat…" is worse than no header at all. Model is
             # the one that loses, because the run inspector and the row tooltip
-            # both carry it. `resizable`/`hideable` matter because Dear PyGui
+            # both carry it. The three narrow columns are sized to their own
+            # headers rather than to a share of the panel, so "Steps" and "Age"
+            # stay readable at every window width and the space that is left
+            # goes to the id. `resizable`/`hideable` matter because Dear PyGui
             # ignores `configure_item(column, show=...)` and `default_hide`
             # entirely, so the header menu is the only way a reader can trade
             # one column for another.
@@ -775,17 +809,28 @@ class OpentineGUI:
                 policy=dpg.mvTable_SizingStretchProp,
                 tag="run_table",
             ):
+                dpg.bind_item_theme("run_table", _table_theme())
                 dpg.add_table_column(label="Run", tag="col_id", init_width_or_weight=2.4)
-                dpg.add_table_column(label="State", tag="col_status", init_width_or_weight=1.3)
-                dpg.add_table_column(label="Steps", tag="col_steps", init_width_or_weight=0.9)
-                dpg.add_table_column(label="Cost", tag="col_cost", init_width_or_weight=1.3)
-                dpg.add_table_column(label="Age", tag="col_age", init_width_or_weight=0.8)
+                dpg.add_table_column(
+                    label="State", tag="col_status", width_fixed=True, init_width_or_weight=_px(76)
+                )
+                dpg.add_table_column(
+                    label="Steps", tag="col_steps", width_fixed=True, init_width_or_weight=_px(58)
+                )
+                dpg.add_table_column(
+                    label="Cost", tag="col_cost", width_fixed=True, init_width_or_weight=_px(76)
+                )
+                dpg.add_table_column(
+                    label="Age", tag="col_age", width_fixed=True, init_width_or_weight=_px(46)
+                )
             dpg.add_separator()
             dpg.add_text("Load errors", color=ACCENT_ORANGE, tag="err_header", show=False)
             dpg.add_text("", tag="err_text", wrap=_px(312), color=ACCENT_ORANGE)
 
     def _build_detail_panel(self) -> None:
-        with dpg.child_window(width=_px(500), height=-_px(76), border=True, tag="panel_detail"):
+        with dpg.child_window(
+            width=_px(500), height=-_px(MESSAGE_STRIP_QUIET + 14), border=True, tag="panel_detail"
+        ):
             with dpg.group(horizontal=True):
                 _panel_header("Run inspector", "Trace metadata", "panel_detail_subtitle")
                 dpg.add_spacer(width=_px(8))
@@ -811,7 +856,9 @@ class OpentineGUI:
             )
 
     def _build_dag_panel(self) -> None:
-        with dpg.child_window(border=True, height=-_px(76), tag="panel_dag"):
+        with dpg.child_window(
+            border=True, height=-_px(MESSAGE_STRIP_QUIET + 14), tag="panel_dag"
+        ):
             _panel_header("Step DAG", "Parent-child execution graph")
             dpg.add_text(
                 "Select a run to inspect its opentine step graph.",
@@ -823,7 +870,9 @@ class OpentineGUI:
                 dpg.add_input_text(
                     hint="Highlight: id, kind, tool, provider, payload (Enter)",
                     tag="step_filter",
-                    width=_px(330),
+                    # Relative, so the three buttons beside it keep their labels
+                    # whole however narrow the panel gets.
+                    width=-_px(232),
                     callback=self._on_step_filter_change,
                     on_enter=True,
                 )
@@ -842,6 +891,13 @@ class OpentineGUI:
                     "A non-parent step this one required. A fork keeps these too.",
                 )
             dpg.add_separator()
+            # Shown instead of the editor when there is nothing to draw. An
+            # empty node editor is a large grey grid that looks like a failure.
+            with dpg.child_window(tag="dag_empty", border=False, show=False):
+                dpg.add_spacer(height=_px(40))
+                dpg.add_text("", tag="dag_empty_title", color=TEXT_SECONDARY, wrap=_px(520))
+                dpg.add_spacer(height=_px(8))
+                dpg.add_text("", tag="dag_empty_hint", color=TEXT_MUTED, wrap=_px(520))
             with dpg.node_editor(
                 tag="dag_editor",
                 callback=self._on_link_created,
@@ -853,7 +909,9 @@ class OpentineGUI:
 
     def _build_status_bar(self) -> None:
         dpg.add_separator()
-        with dpg.child_window(height=_px(62), border=False, tag="panel_messages"):
+        with dpg.child_window(
+            height=_px(MESSAGE_STRIP_QUIET), border=False, tag="panel_messages"
+        ):
             with dpg.group(horizontal=True):
                 dpg.add_text("", tag="status_bar", color=TEXT_SECONDARY)
                 dpg.add_spacer(width=_px(8))
@@ -966,8 +1024,11 @@ class OpentineGUI:
                         f"  (x{self._messages[-1].repeats})",
                     )
             return
+        first = not self._messages
         self._messages.append(_Message(level=level, text=text, at=time.time()))
         del self._messages[:-MAX_MESSAGES]
+        if first:
+            self._resize_message_strip(open_strip=True)
         if dpg.does_item_exist("status_bar"):
             dpg.set_value("status_bar", text)
         if dpg.does_item_exist("message_log"):
@@ -997,10 +1058,18 @@ class OpentineGUI:
 
     def _toggle_messages(self) -> None:
         show = bool(dpg.get_value("menu_messages"))
-        if dpg.does_item_exist("panel_messages"):
-            dpg.configure_item("panel_messages", height=_px(62) if show else _px(24))
         if dpg.does_item_exist("message_log"):
             dpg.configure_item("message_log", show=show)
+        self._resize_message_strip(open_strip=show and bool(self._messages))
+
+    def _resize_message_strip(self, *, open_strip: bool) -> None:
+        """Give the bottom strip one row or four, and the panels the rest."""
+        height = MESSAGE_STRIP_OPEN if open_strip else MESSAGE_STRIP_QUIET
+        if dpg.does_item_exist("panel_messages"):
+            dpg.configure_item("panel_messages", height=_px(height))
+        for tag in ("panel_runs", "panel_detail", "panel_dag"):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, height=-_px(height + 14))
 
     def _force_refresh(self) -> None:
         self._loader.request(force=True)
@@ -1178,6 +1247,8 @@ class OpentineGUI:
                 self._select_entry(target.key)
             else:
                 self._select_after_scan = pending  # not written yet; try the next scan
+        if self._selected_run is None:
+            self._show_dag_placeholder()
         self._render_run_table()
         self._render_errors()
         self._update_action_state()
@@ -1194,6 +1265,13 @@ class OpentineGUI:
             self._note("warn", snapshot.note)
 
     def _render_source_badge(self) -> None:
+        if dpg.does_item_exist("panel_runs_subtitle"):
+            # The panel's own subtitle used to say what a run list is for. It
+            # says what this one holds instead: the same row, carrying a fact.
+            problems = len(self._errors)
+            kind = "v3 repository" if self._snapshot.kind == "repository" else ".tine directory"
+            note = f", {problems} problem(s)" if problems else ""
+            dpg.set_value("panel_runs_subtitle", f"{len(self._entries)} in this {kind}{note}")
         if not dpg.does_item_exist("source_badge"):
             return
         if self._snapshot.kind == "repository":
@@ -1525,6 +1603,35 @@ class OpentineGUI:
     def _show_step_detail(self, step: Step) -> None:
         dpg.set_value("step_text", self._panel_text(_step_detail_lines(step)))
 
+    def _show_dag_placeholder(self) -> None:
+        """Swap the node editor for guidance when there is no graph to draw."""
+        if not dpg.does_item_exist("dag_empty"):
+            return
+        if self._entries:
+            title = "Select a run to draw its step graph."
+            hint = (
+                "The graph shows execution lineage in grey and causal edges in purple — "
+                "the extra ancestors a fork keeps."
+            )
+        elif self._snapshot.errors:
+            title = "Nothing here could be loaded."
+            hint = "The problems are listed under the run list."
+        else:
+            title = f"No runs in {_oneline(self._runs_dir)}."
+            hint = (
+                "File > Change runs dir (Ctrl+O) points the console at a directory of .tine "
+                "files or an opentine v3 repository. `python demo/seed.py` writes a sample set."
+            )
+        dpg.set_value("dag_empty_title", title)
+        dpg.set_value("dag_empty_hint", hint)
+        dpg.configure_item("dag_empty", show=True)
+        dpg.configure_item("dag_editor", show=False)
+
+    def _hide_dag_placeholder(self) -> None:
+        if dpg.does_item_exist("dag_empty"):
+            dpg.configure_item("dag_empty", show=False)
+            dpg.configure_item("dag_editor", show=True)
+
     def _clear_dag(self) -> None:
         # Links (slot 0) must go before nodes (slot 1): deleting a node that a
         # live link still references segfaults Dear PyGui's native layer.
@@ -1535,6 +1642,7 @@ class OpentineGUI:
         self._node_ids.clear()
         if dpg.does_item_exist("dag_summary"):
             dpg.set_value("dag_summary", "Select a run to inspect its opentine step graph.")
+        self._show_dag_placeholder()
 
     def _dag_avail_width(self) -> int:
         if dpg.does_item_exist("panel_dag"):
@@ -1552,6 +1660,7 @@ class OpentineGUI:
     def _rebuild_dag(self, run: Run, highlight: set[str] | None = None) -> None:
         highlight = highlight or set()
         self._clear_dag()
+        self._hide_dag_placeholder()
         # One summary, from the matches already in hand: computing it again here
         # walked every step's payload a second time per keystroke.
         summary = (
@@ -2057,8 +2166,11 @@ class OpentineGUI:
     def _on_viewport_resize(self, *_args) -> None:
         """Scale panel widths and text wraps with the viewport; keep panels visible."""
         vw = dpg.get_viewport_client_width()
-        left = max(_px(300), min(_px(460), int(vw * 0.26)))
-        center = max(_px(380), min(_px(560), int(vw * 0.33)))
+        # The four narrow columns take a fixed 230dp between them, so the run id
+        # gets whatever the panel has left: too small a share and every id in the
+        # list clips to the same prefix, which is the one thing the column is for.
+        left = max(_px(330), min(_px(480), int(vw * 0.27)))
+        center = max(_px(370), min(_px(520), int(vw * 0.30)))
         if dpg.does_item_exist("panel_runs"):
             dpg.configure_item("panel_runs", width=left)
         if dpg.does_item_exist("panel_detail"):

@@ -789,14 +789,24 @@ def test_auto_refresh_can_be_switched_off_and_back_on(tmp_path: Path, gui_factor
 
 def test_the_message_log_can_be_collapsed(tmp_path: Path, gui_factory, fake_dpg):
     gui = gui_factory(tmp_path)
+    quiet = fake_dpg.config("panel_messages")["height"]
+
+    # A strip with nothing in it stays one row: four reserved rows of empty
+    # panel read as something that failed to load rather than as silence.
+    gui._note("info", "something happened")
+    opened = fake_dpg.config("panel_messages")["height"]
+    assert opened > quiet
+    assert fake_dpg.config("panel_runs")["height"] > fake_dpg.config("panel_runs")["height"] - 1
+
     fake_dpg.set_value("menu_messages", False)
     gui._toggle_messages()
     assert fake_dpg.config("message_log")["show"] is False
-    collapsed = fake_dpg.config("panel_messages")["height"]
+    assert fake_dpg.config("panel_messages")["height"] == quiet
+
     fake_dpg.set_value("menu_messages", True)
     gui._toggle_messages()
     assert fake_dpg.config("message_log")["show"] is True
-    assert fake_dpg.config("panel_messages")["height"] > collapsed
+    assert fake_dpg.config("panel_messages")["height"] == opened
 
 
 # ---------------------------------------------------------------- keys and sort

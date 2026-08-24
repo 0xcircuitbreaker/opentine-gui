@@ -57,6 +57,7 @@ from opentine_gui.graphmodel import (
     _step_depths,
     causal_edges,
     retained_slice,
+    run_providers,
 )
 from opentine_gui.inspectors import (
     _cost_cell,
@@ -94,6 +95,7 @@ from opentine_gui.text import (
     _elide_middle,
     _format_age,
     _format_bytes,
+    _format_counts,
     _format_timestamp,
     _format_value,
     _indent_block,
@@ -1440,6 +1442,7 @@ class OpentineGUI:
             _oneline(run.id),
             f"{run.status.value}  {len(run.steps)} step(s)  {_cost_cell(run)}",
             f"model {_oneline(run.model_info) or '(none)'}",
+            "provider " + (_format_counts(run_providers(run)) or "(none recorded)"),
             f"created {_format_timestamp(getattr(run, 'created_at', 0.0))}",
         ]
         if entry.location:

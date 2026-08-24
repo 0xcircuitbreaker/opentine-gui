@@ -31,6 +31,7 @@ from opentine_gui.pricing import _cost_is_attributable, unpriced_reason
 from opentine_gui.sources import (
     _cache_key,
     _remember,
+    _short_oid,
     _signature_verdict,
     _verify_integrity_cached,
 )
@@ -51,6 +52,14 @@ from opentine_gui.trust import (
     signature_scheme,
 )
 from opentine_gui.trust import verifier as trust_verifier
+
+try:
+    # opentine's own map from a step to its position in the graph, which is how
+    # `Run.diff` pairs steps that do not share an id. Private, so a rename costs
+    # the repository half of the comparison extension and nothing else.
+    from opentine._graph_diff import _position_keys
+except Exception:  # pragma: no cover - depends on the installed opentine
+    _position_keys = None
 
 try:
     # opentine 0.4.0's only surface for the fork-id check. It is not exported
@@ -751,6 +760,42 @@ def _transcript_summary(run: Run) -> str:
 # ------------------------------------------------------------------------ diff
 
 
+def _short_step(step_id: object) -> str:
+    """A step id short enough for a diff row, in whichever shape it arrives.
+
+    A `.tine` step id is a bare hash and its first twelve characters identify
+    it. A v3 event id is `event:sha256:<hex>`, where the first twelve characters
+    are the word "event:sha256" and say nothing at all.
+    """
+    text = _oneline(step_id)
+    return _short_oid(text) if ":sha256:" in text else text[:12]
+
+
+def _paired_steps(left: Run, right: Run) -> list[tuple[str, Step, Step]]:
+    """(id, left step, right step) for the steps these two runs have in common.
+
+    By id first, which is how a `.tine` fork and its origin line up. When the
+    ids do not intersect at all, by graph position instead: in a v3 repository a
+    step id *is* the content address of the event, and `provider` is inside the
+    addressed payload — so two runs differing only in who served the calls share
+    no ids whatsoever, and pairing by id alone reported them as identical.
+    """
+    left_steps = {step.id: step for step in left.steps}
+    right_steps = {step.id: step for step in right.steps}
+    shared = [sid for sid in left_steps if sid in right_steps]
+    if shared:
+        return [(sid, left_steps[sid], right_steps[sid]) for sid in shared]
+    if _position_keys is None:
+        return []
+    right_by_position = {position: sid for sid, position in _position_keys(right).items()}
+    pairs: list[tuple[str, Step, Step]] = []
+    for sid, position in _position_keys(left).items():
+        twin = right_by_position.get(position)
+        if twin is not None and sid in left_steps and twin in right_steps:
+            pairs.append((sid, left_steps[sid], right_steps[twin]))
+    return pairs
+
+
 def _extra_step_deltas(left: Run, right: Run, *, limit: int = 12) -> list[str]:
     """Differences opentine's own `Run.diff` does not look at.
 
@@ -762,14 +807,12 @@ def _extra_step_deltas(left: Run, right: Run, *, limit: int = 12) -> list[str]:
     its own extension rather than as opentine's verdict.
     """
     try:
-        left_steps = {step.id: step for step in left.steps}
-        right_steps = {step.id: step for step in right.steps}
+        pairs = _paired_steps(left, right)
     except Exception:
         return []
     lines: list[str] = []
-    for step_id in [sid for sid in left_steps if sid in right_steps]:
-        a, b = left_steps[step_id], right_steps[step_id]
-        short = _oneline(step_id)[:12]
+    for step_id, a, b in pairs:
+        short = _short_step(step_id)
         before, after = step_provider(a), step_provider(b)
         if before != after:
             lines.append(f"  {short}  provider: {before or '(none)'} -> {after or '(none)'}")
@@ -802,7 +845,7 @@ def _format_run_diff(left: Run, right: Run, *, max_steps: int = 25, max_fields: 
             lines.append("  (none)")
             return
         for step in steps[:max_steps]:
-            lines.append(f"  {_oneline(step.id)[:12]}  {_node_label(step)}")
+            lines.append(f"  {_short_step(step.id)}  {_node_label(step)}")
         if len(steps) > max_steps:
             lines.append(f"  ...and {len(steps) - max_steps} more")
 
@@ -815,9 +858,9 @@ def _format_run_diff(left: Run, right: Run, *, max_steps: int = 25, max_fields: 
     if not diff.changed:
         lines.append("  (none)")
     for change in diff.changed[:max_steps]:
-        a_id = _oneline(getattr(change.step_a, "id", "?"))
-        b_id = _oneline(getattr(change.step_b, "id", "?"))
-        lines.append(f"  {a_id[:12]} -> {b_id[:12]}")
+        a_id = _short_step(getattr(change.step_a, "id", "?"))
+        b_id = _short_step(getattr(change.step_b, "id", "?"))
+        lines.append(f"  {a_id} -> {b_id}")
         for delta in change.fields[:max_fields]:
             keys = f" [{', '.join(map(str, delta.changed_keys))}]" if delta.changed_keys else ""
             lines.append(f"    {_oneline(delta.name)}{keys}")

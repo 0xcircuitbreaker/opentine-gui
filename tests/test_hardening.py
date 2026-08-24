@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 from pathlib import Path
 
@@ -362,3 +363,178 @@ def test_the_write_confirmation_names_what_would_be_lost(tmp_path: Path, gui_fac
         assert "provider" not in question
     else:
         assert "provider" in question and "cannot read" in question
+
+
+# ---- opentine 0.8.x: what the console says about a price and a provider -----
+
+
+def test_two_repository_runs_differing_only_in_provider_are_not_identical(tmp_path: Path) -> None:
+    # In a v3 repository the step id *is* the content address of the event and
+    # `provider` sits inside the addressed payload, so two runs differing only in
+    # who served the calls share no step ids at all. Pairing by id alone reported
+    # "Changed (0): (none)" — a positive false statement about two runs that
+    # differ, on exactly the comparison opentine 0.8.0 exists for.
+    from opentine.repo import Repo
+
+    from opentine_gui.sources import RepositorySource
+
+    repo = Repo.init(tmp_path / "store")
+    for name, provider in (("a", "anthropic"), ("b", "openai")):
+        run = Run(id=f"run-{name}", status=RunStatus.completed)
+        run.add_step(
+            StepKind.model,
+            {"text": "same prompt"},
+            {"text": "same answer"},
+            model_info="m",
+            provider=provider,
+            cost=0.03,
+            usage={"input": 10, "output": 5},
+        )
+        repo.put_run(run, ref=f"heads/{name}")
+
+    entries = RepositorySource(tmp_path / "store").scan().entries
+    assert len(entries) == 2
+    left, right = entries[0].run, entries[1].run
+    assert {s.id for s in left.steps}.isdisjoint({s.id for s in right.steps})
+
+    text = _format_run_diff(left, right)
+    assert "provider:" in text
+    assert "anthropic" in text and "openai" in text
+
+
+def test_a_price_from_an_unsigned_overlay_says_which_catalog_priced_it() -> None:
+    # opentine requires a signature only on its own bundled catalog; an overlay
+    # in the working directory, the user config or $TINE_PRICING_CATALOG is
+    # loaded unsigned and wins the lookup. "opentine's signed catalog" is not a
+    # claim the panel can make unconditionally.
+    from opentine_gui.app import _pricing_provenance
+    from opentine_gui.pricing import RunQuote, quote_lines
+
+    def _quote(signed: bool) -> RunQuote:
+        return RunQuote(
+            available=True,
+            total_usd=1.0,
+            priced=1,
+            unknown=0,
+            skipped=0,
+            by_model={"m": 1.0},
+            by_provider={"p": 1.0},
+            unknown_models=(),
+            catalog_id="sha256:abc",
+            catalog_hash="abcdef012345",
+            effective_at="recorded",
+            steps=(),
+            detail="",
+            catalog_signed=signed,
+        )
+
+    assert quote_lines(_quote(True))[0].startswith("Post-hoc price (signed catalog")
+    assert quote_lines(_quote(False))[0].startswith("Post-hoc price (UNSIGNED overlay catalog")
+    assert "signed catalog" in _pricing_provenance(_quote(True))
+    assert "UNSIGNED overlay" in _pricing_provenance(_quote(False))
+
+
+def test_a_run_level_field_this_opentine_cannot_read_is_named_before_a_save(
+    tmp_path: Path,
+) -> None:
+    # `run_from_dict` enumerates the run fields it reads and discards the rest,
+    # exactly as the step reader does — so a field a newer opentine writes beside
+    # `graph` dies on save the same way `causal_ids` and `provider` would, one
+    # nesting level up, and previously with no dialog at all.
+    from opentine_gui.sources import _fields_a_save_would_drop
+
+    path = tmp_path / "abc.tine"
+    _run().save(path)
+    raw = json.loads(path.read_text())
+    raw["attestations"] = [{"claim": "reviewed"}]
+    path.write_text(json.dumps(raw))
+    assert _fields_a_save_would_drop(path) == ("attestations",)
+
+
+def test_the_statistics_rows_add_up_to_the_headline() -> None:
+    # A step naming no provider still spent money. Without a bucket to hold it,
+    # that spend left the breakdown while staying in the header — the sibling
+    # "by model" grouping reconciled and this one did not.
+    from opentine_gui.stats import rollup
+
+    graph = Graph()
+    for index, (provider, amount) in enumerate((("anthropic", 3.0), ("", 1.0), ("google", 2.0))):
+        graph.add(
+            Step(
+                id=f"m{index}",
+                parent_ids=[],
+                kind=StepKind.model,
+                inputs={"text": "x"},
+                model_info=f"model-{index}",
+                provider=provider,
+                billing={"status": "complete", "known_subtotal_usd": amount},
+            )
+        )
+    run = Run(id="mixed", graph=graph, status=RunStatus.completed)
+    result = rollup([run], group_by="provider")
+    assert result.total.cost == pytest.approx(6.0)
+    assert sum(bucket.cost or 0.0 for bucket in result.buckets) == pytest.approx(6.0)
+    assert "(unrecorded)" in {bucket.label for bucket in result.buckets}
+
+
+def test_a_bucket_named_all_does_not_become_the_headline() -> None:
+    from opentine_gui.stats import rollup
+
+    graph = Graph()
+    for index, (model, amount) in enumerate((("gpt", 7.0), ("all", 3.0))):
+        graph.add(
+            Step(
+                id=f"m{index}",
+                parent_ids=[],
+                kind=StepKind.model,
+                inputs={"text": "x"},
+                model_info=model,
+                provider="openai",
+                billing={"status": "complete", "known_subtotal_usd": amount},
+            )
+        )
+    run = Run(id="collide", graph=graph, status=RunStatus.completed)
+    assert rollup([run], group_by="model").total.cost == pytest.approx(10.0)
+
+
+def test_an_override_rate_card_names_its_provider_not_its_shape() -> None:
+    # `bill(..., unmetered=True)` mints "override:<provider>:<model>", which is
+    # what all thirteen of 0.8.0's local servers record.
+    step = Step(
+        id="o",
+        parent_ids=[],
+        kind=StepKind.model,
+        inputs={},
+        model_info="qwen3-8b",
+        billing={"status": "unmetered", "rate_card_id": "override:vllm:qwen3-8b"},
+    )
+    from opentine_gui.graphmodel import step_provider
+
+    assert step_provider(step) == "vllm"
+
+
+def test_a_repository_object_id_is_not_a_cache_key_on_its_own(tmp_path: Path) -> None:
+    # Content addressing makes an oid a permanent name for its bytes, which is
+    # why the cache never expires — but it says nothing about which store holds
+    # them, and a second repository naming the same oid was served the first
+    # one's run under a trust row that says every object is verified on read.
+    from opentine.repo import Repo
+
+    from opentine_gui.sources import RepositorySource, reset_caches
+
+    reset_caches()
+    first = tmp_path / "first"
+    run = Run(id="honest", status=RunStatus.completed)
+    run.add_step(StepKind.done, {"text": "the honest run"})
+    Repo.init(first).put_run(run, ref="heads/main")
+    entries = RepositorySource(first).scan().entries
+    assert [entry.run.steps[0].inputs["text"] for entry in entries] == ["the honest run"]
+
+    second = tmp_path / "second"
+    shutil.copytree(first, second)
+    oid = entries[0].key
+    _, _, digest = oid.rpartition(":")
+    corrupt = second / ".tine" / "objects" / "run" / digest[:2] / digest[2:]
+    corrupt.write_bytes(b"not an object")
+    snapshot = RepositorySource(second).scan()
+    assert snapshot.entries == [] and snapshot.errors, "the second store must be read, not cached"

@@ -179,6 +179,31 @@ def _signature_verdict(
     return _verify_cached(path, stat_result, f"signature:{fingerprint}", verifier)
 
 
+#: Run-level keys `run_from_dict` reads. It enumerates them explicitly and
+#: discards the rest, so a field a newer opentine writes beside `graph` and
+#: `manifest` is destroyed by a save here exactly the way a newer *step* field
+#: is — one nesting level up, and previously with no warning at all.
+_KNOWN_RUN_FIELDS = frozenset(
+    {
+        "run_id",
+        "status",
+        "graph",
+        "refs",
+        "transcript",
+        "manifest",
+        "policies",
+        "cache",
+        "metadata",
+        "created_at",
+        "model_info",
+        "system_prompt",
+        "user_prompt",
+        "format_version",
+        "tags",
+        "draft",
+    }
+)
+
 #: Step keys this build's `Step` can hold. `causal_ids` arrived in opentine
 #: 0.7.1 and `provider` in 0.8.0, so the set grows with the installed library —
 #: which is the point: what it cannot name, it cannot round-trip.
@@ -204,9 +229,9 @@ def _fields_a_save_would_drop(path: Path) -> tuple[str, ...]:
         if path.stat().st_size > MAX_TINE_BYTES:
             return ()
         data = json.loads(path.read_text(encoding="utf-8"))
+        unknown = set(data) - _KNOWN_RUN_FIELDS
         steps = data["graph"]["steps"]
         records = steps.values() if isinstance(steps, dict) else steps
-        unknown: set[str] = set()
         for record in records:
             if isinstance(record, dict):
                 unknown |= set(record) - _KNOWN_STEP_FIELDS

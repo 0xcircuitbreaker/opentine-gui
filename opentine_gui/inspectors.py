@@ -139,10 +139,20 @@ def _recorded_cost_state(run: Run) -> str:
     return _facts(run, "cost_state", _read_cost_state)
 
 
+def _billing_status(step: Step) -> str:
+    """The status opentine's billing recorded for one step, or "" if none did."""
+    billing = getattr(step, "billing", None)
+    if isinstance(billing, dict):
+        status = billing.get("status")
+        if isinstance(status, str):
+            return status
+    return ""
+
+
 def _read_cost_state(run: Run) -> str:
     """How to read this run's recorded cost.
 
-    One of "priced", "partial", "unrecorded" or "unreadable".
+    One of "priced", "unmetered", "partial", "unrecorded" or "unreadable".
 
     A run whose steps carry no billing at all — an imported trace, a run
     captured against an unmetered local model — legitimately sums to zero. That
@@ -163,6 +173,12 @@ def _read_cost_state(run: Run) -> str:
             return "priced" if total else "unrecorded"
         if total:
             return "priced"
+        if billable and all(_billing_status(step) == "unmetered" for step in billable):
+            # opentine 0.8.0 made thirteen local model servers nameable, all
+            # recorded unmetered. Such a run really did cost nothing to call,
+            # which is a different fact from "the arithmetic came to zero" and a
+            # very different one from "nothing priced it".
+            return "unmetered"
         # Not the truthiness of the billing dict: the honest shape for something
         # nothing could price is `{"status": "unknown", ...}` beside `cost: 0.0`,
         # and reading that as "billed and genuinely free" let the artifact pick
@@ -188,6 +204,8 @@ def _cost_text(run: Run, amount: float | None = None) -> str:
         return "no cost recorded"
     if value is None:
         return "cost unreadable"
+    if amount is None and state == "unmetered":
+        return "$0.0000 (unmetered)"
     return f"{'>=' if state == 'partial' else ''}${value:.4f}"
 
 
@@ -214,7 +232,12 @@ def _pricing_line(run: Run) -> str:
         if state == "unrecorded":
             return (
                 "Pricing: nothing priced at capture "
-                "(imported or unmetered - use Run > Price this run)"
+                "(imported or third-party - use Run > Price this run)"
+            )
+        if state == "unmetered":
+            return (
+                "Pricing: unmetered - every model call was served by something that "
+                "charges nothing per token (a local server), so no rate card applies"
             )
         return ""
     if total:

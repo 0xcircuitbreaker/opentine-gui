@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -82,6 +82,11 @@ class StepQuote:
     #: True when the provider was supplied by the reader rather than recorded.
     #: A price computed from an assumption has to say so wherever it is shown.
     assumed: bool = False
+    #: True when capture recorded this call as unmetered — a local model server,
+    #: which charges nothing per token. The catalog has no card for one, so the
+    #: post-hoc status is "unknown"; that is a statement about the catalog, and
+    #: without this the panel would let it read as a statement about the call.
+    recorded_unmetered: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,6 +108,12 @@ class RunQuote:
     detail: str
     #: The provider the reader supplied for steps that recorded none, if any.
     assumed_provider: str = ""
+    #: How many steps came back with each status, verbatim from the catalog.
+    #: "unmetered" is not "complete" and neither is "unknown"; a total alone
+    #: cannot tell those apart.
+    status_counts: dict[str, int] = field(default_factory=dict)
+    #: How many of the unknown steps were recorded unmetered at capture.
+    unmetered_at_capture: int = 0
 
 
 # Loading the catalog parses and verifies a signed 75-card document off disk,
@@ -242,6 +253,18 @@ def quote_lines(quote: RunQuote, *, limit: int = 6) -> list[str]:
         lines.append(f"  {'unknown'.ljust(14)}{_plural(quote.unknown, 'step')}{suffix}")
     if quote.skipped:
         lines.append(f"  {'not billable'.ljust(14)}{_plural(quote.skipped, 'step')}")
+    # The catalog's own words. "unmetered" is a local server that costs nothing
+    # to call, which is a different fact from "complete, and it came to zero".
+    metered = {name: count for name, count in quote.status_counts.items() if name != _UNKNOWN}
+    if metered and set(metered) != {"complete"}:
+        rendered = ", ".join(f"{name} {count}" for name, count in metered.items())
+        lines.append(f"  {'status'.ljust(14)}{rendered}")
+    if quote.unmetered_at_capture:
+        lines.append(
+            f"  {'unmetered'.ljust(14)}"
+            f"{_plural(quote.unmetered_at_capture, 'step')} recorded unmetered at capture; "
+            "no rate card exists for a local server"
+        )
     if quote.assumed_provider:
         assumed = sum(1 for step in quote.steps if step.assumed)
         lines.append(
@@ -403,6 +426,7 @@ def _quote_step(
     assumed = False
     if not provider and assume_provider:
         provider, assumed = assume_provider, True
+    unmetered = _recorded_status(step) == "unmetered"
     name = _truncate(_oneline(model), _NAME_LIMIT)
     ident = _truncate(_oneline(identifier), _NAME_LIMIT)
     if not usage:
@@ -410,33 +434,45 @@ def _quote_step(
         # rate times zero tokens is zero. A step that reported no usage at all
         # (a streamed or errored span often reports none) is unknown instead.
         return StepQuote(ident, provider, name, _UNKNOWN, None, None,
-                         "no billable usage recorded", assumed)
+                         "no billable usage recorded", assumed, unmetered)
+    moment = _record_moment(step)
     try:
         result = bill(
             provider,
             model,
             Usage.from_dict(usage),
             catalog=catalog,
-            effective_at=_card_date(when, _record_moment(step), pinned),
+            effective_at=_card_date(when, moment, pinned),
+            # opentine-pricing/2 rate cards carry peak/off-peak windows, and the
+            # window is chosen by the *instant* a step was recorded, never by the
+            # as-of date — "the rate it was really billed", in opentine's own
+            # words. Omitting this priced every scheduled card at its base rate,
+            # which for DeepSeek V4 is the off-peak one.
+            billed_at=moment,
         )
     except Exception as e:
         # `Usage` rejects a non-integer, negative or unsafely large token count,
         # and a foreign artifact is full of them. That is a fact about the step,
         # not a failure of the console, so it is reported on the step's own row.
-        return StepQuote(ident, provider, name, "error", None, None, _reason(e), assumed)
+        return StepQuote(
+            ident, provider, name, "error", None, None, _reason(e), assumed, unmetered
+        )
     status = _truncate(_oneline(getattr(result, "status", "")), 24) or _UNKNOWN
     card = getattr(result, "rate_card_id", None)
     card_id = _truncate(_oneline(card), _NAME_LIMIT) if isinstance(card, str) and card else None
     if status not in _PRICED_STATUSES:
         return StepQuote(
-            ident, provider, name, status, None, card_id, _first_warning(result), assumed
+            ident, provider, name, status, None, card_id,
+            _first_warning(result) or ("recorded unmetered at capture" if unmetered else ""),
+            assumed, unmetered,
         )
     amount = _to_float(getattr(result, "known_subtotal_usd", None))
     if amount is None:
         return StepQuote(ident, provider, name, _UNKNOWN, None, card_id,
-                         "the catalog returned an amount that cannot be totalled", assumed)
+                         "the catalog returned an amount that cannot be totalled",
+                         assumed, unmetered)
     return StepQuote(
-        ident, provider, name, status, amount, card_id, _first_warning(result), assumed
+        ident, provider, name, status, amount, card_id, _first_warning(result), assumed, unmetered
     )
 
 
@@ -470,24 +506,53 @@ def _upstream_quotes(
         # this console can still read, the local rollup below answers instead of
         # the panel going blank.
         return None
+    # What capture recorded, keyed by step: opentine's pass reports what the
+    # catalog says, and "unknown" for a local server is a fact about the catalog
+    # rather than about the call.
+    recorded = {}
+    for step in _run_steps(run):
+        identifier = _truncate(_oneline(_read_record(step)[4]), _NAME_LIMIT)
+        recorded[identifier] = _recorded_status(step)
     quotes: list[StepQuote] = []
     for price in prices:
         status = _truncate(_oneline(getattr(price, "status", "")), 24) or _UNKNOWN
         amount = _to_float(getattr(price, "known_subtotal_usd", None))
         answered = status in _PRICED_STATUSES and amount is not None
         card = getattr(price, "rate_card_id", None)
+        identifier = _truncate(_oneline(getattr(price, "step_id", "")), _NAME_LIMIT)
+        unmetered = recorded.get(identifier) == "unmetered"
         quotes.append(
             StepQuote(
-                _truncate(_oneline(getattr(price, "step_id", "")), _NAME_LIMIT),
+                identifier,
                 _truncate(_oneline(getattr(price, "provider", "")), _NAME_LIMIT),
                 _truncate(_oneline(getattr(price, "model", "")), _NAME_LIMIT),
                 status if answered else _UNKNOWN,
                 amount if answered else None,
                 _truncate(_oneline(card), _NAME_LIMIT) if isinstance(card, str) and card else None,
-                _first_warning_of(getattr(price, "billing", None)),
+                _first_warning_of(getattr(price, "billing", None))
+                or ("recorded unmetered at capture" if unmetered and not answered else ""),
+                False,
+                unmetered,
             )
         )
     return quotes
+
+
+def _recorded_status(step: Any) -> str:
+    """The billing status capture recorded for this step, or "" if none did."""
+    billing = getattr(step, "billing", None)
+    if isinstance(billing, dict):
+        status = billing.get("status")
+        if isinstance(status, str):
+            return status
+    return ""
+
+
+def _status_counts(quotes: list[StepQuote]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for quote in quotes:
+        counts[quote.status] = counts.get(quote.status, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _roll_up(
@@ -536,6 +601,10 @@ def _roll_up(
         steps=tuple(quotes),
         detail=_join(note, _shortfall(priced, unknown, failed)),
         assumed_provider=assumed_provider,
+        status_counts=_status_counts(quotes),
+        unmetered_at_capture=sum(
+            1 for quote in quotes if quote.recorded_unmetered and quote.amount_usd is None
+        ),
     )
 
 

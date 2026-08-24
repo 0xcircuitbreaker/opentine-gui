@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import shutil
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from opentine.core import Graph, Run, RunStatus, Step, StepKind
 
-#: `Step.provider` is post-0.7.2. Seeding it on an older opentine would raise,
-#: so the demo records it only where the installed library has the field.
+#: `Step.provider` arrived in opentine 0.8.0, which is this console's floor, so
+#: the demo records it unconditionally. Kept as a name because the artifacts it
+#: writes are also read by older libraries in the compatibility tests.
 SUPPORTS_PROVIDER = "provider" in getattr(Step, "__dataclass_fields__", {})
 
 
@@ -312,6 +314,65 @@ def imported_unpriced() -> Run:
     )
 
 
+def unmetered_local() -> Run:
+    """A run served by a local model server, which charges nothing per token.
+
+    opentine 0.8.0 made thirteen of these nameable, all recorded unmetered. Its
+    cost is a real, recorded zero — a different fact from a run nothing priced,
+    and the console has to say which zero it is looking at.
+    """
+    steps = [
+        _step("l1", [], StepKind.think, {"text": "Summarise the on-call log locally."}),
+        _step(
+            "l2", ["l1"], StepKind.model,
+            {"text": "Summarise 400 lines of log."},
+            {"text": "Three incidents, all disk pressure on node 4."},
+            duration=8.4, model="llama-3.3-70b", provider="vllm",
+            usage={"input": 12_400, "output": 320, "total": 12_720},
+            billing={"status": "unmetered", "known_subtotal_usd": 0.0},
+            ts=time.time() - 300,
+        ),
+        _step("l3", ["l2"], StepKind.done, {"text": "Disk pressure on node 4, three times."}),
+    ]
+    return _run(
+        "demo-local", steps,
+        status=RunStatus.completed,
+        model_info="llama-3.3-70b",
+        user_prompt="What happened on call last night?",
+        created_at=time.time() - 320,
+    )
+
+
+def peak_window() -> Run:
+    """A run billed inside a peak window of an `opentine-pricing/2` rate card.
+
+    DeepSeek V4 moved to peak/off-peak billing, which opentine 0.8.0 represents
+    as a schedule on the card. The window is chosen by the instant a step ran, so
+    this run costs twice what the same tokens cost twelve hours later — and the
+    console has to agree with `tine price` about that.
+    """
+    peak = datetime(2026, 8, 19, 3, 30, tzinfo=UTC).timestamp()  # inside 01:00-04:00 UTC
+    steps = [
+        _step(
+            "d1", [], StepKind.model,
+            {"text": "Draft the quarterly summary."},
+            {"text": "Four pages, six charts."},
+            duration=12.0, model="deepseek-v4-pro", provider="deepseek",
+            usage={"input": 1_000_000, "output": 200_000, "total": 1_200_000},
+            billing={"status": "complete", "known_subtotal_usd": 2.112},
+            cost=2.112, ts=peak,
+        ),
+        _step("d2", ["d1"], StepKind.done, {"text": "Summary drafted."}),
+    ]
+    return _run(
+        "demo-peak", steps,
+        status=RunStatus.completed,
+        model_info="deepseek-v4-pro",
+        user_prompt="Draft the quarterly summary.",
+        created_at=peak,
+    )
+
+
 #: Not a secret: a fixed demo key so `tine-gui` can be shown verifying a real
 #: signature. Point OPENTINE_GUI_HMAC_KEY at it (or at a file holding it) to see
 #: the trust panel say "verified" rather than "no key".
@@ -351,6 +412,8 @@ def main(runs_dir: Path | str = Path(".tine_runs")) -> None:
         real_fork(failed),
         causal_run(),
         imported_unpriced(),
+        unmetered_local(),
+        peak_window(),
     ]:
         path = runs_dir / f"{run.id}.tine"
         run.save(path)

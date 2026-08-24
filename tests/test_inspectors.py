@@ -260,11 +260,17 @@ def test_a_run_nothing_ever_priced_says_so_instead_of_zero() -> None:
 
 def test_a_billed_run_that_genuinely_cost_nothing_still_shows_zero() -> None:
     # An unmetered local model is priced *and* free. "no cost recorded" would be
-    # the wrong claim about it, because this one was recorded.
+    # the wrong claim about it, because this one was recorded — and since
+    # opentine 0.8.0 made thirteen local servers nameable, the console names the
+    # reason rather than leaving a bare zero to be read as an accounting result.
     run = _billed_run({"status": "unmetered", "amount_usd": "0"})
-    assert _cost_text(run) == "$0.0000"
+    assert _cost_text(run) == "$0.0000 (unmetered)"
+    assert "no cost recorded" not in _cost_text(run)
     assert _cost_cell(run) == "$0.0000"
-    assert _pricing_line(run) == ""
+    # And the panel says which of the three zeroes this is, rather than nothing:
+    # priced-and-free, never-priced, and unmetered are different facts.
+    assert "unmetered" in _pricing_line(run)
+    assert "lower bound" not in _pricing_line(run)
 
 
 def test_the_unpriced_caveat_reaches_the_run_inspector() -> None:

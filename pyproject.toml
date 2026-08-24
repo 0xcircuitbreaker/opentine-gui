@@ -30,14 +30,18 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    # 0.7.1 is the correctness floor, not a preference. Below it opentine cannot
-    # read a `causal_ids` step field (so every console write erases the causal
-    # edges a v3-derived run carries) and cannot verify a `tine-sig/2`
-    # signature (so a valid signature is reported as an error, which reads as
-    # tampering). 0.7.2 additionally round-trips cost and billing through
-    # OpenTelemetry and ships the source-confirmed 75-card pricing catalog, both
-    # of which the import and pricing panels depend on being honest.
-    "opentine>=0.7.2,<0.9",
+    # The floor is a correctness line, not a preference. Each release below it
+    # is missing a field this console reads and writes back, and opentine's
+    # reader ignores keys it does not know — so an older library loads a newer
+    # artifact, drops the field in memory, and destroys it on disk the moment
+    # the console saves:
+    #   0.7.1  `causal_ids`, the edges a fork actually follows
+    #   0.8.0  `provider`, half of the (provider, model, usage) record that
+    #          post-hoc pricing is a function of
+    # 0.8.0 is also what makes `tine price`, time-of-day rate cards and the
+    # unmetered local servers readable at all, which is most of what the cost
+    # panels say.
+    "opentine>=0.8.0,<0.9",
     "dearpygui>=2.0,<3",
 ]
 

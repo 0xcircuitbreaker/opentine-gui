@@ -261,8 +261,11 @@ def test_a_billing_block_that_says_unknown_is_not_a_price() -> None:
 
 
 def test_an_unmetered_zero_is_still_a_price() -> None:
+    # Three different zeroes, three different sentences: this one was priced and
+    # was genuinely free, because opentine 0.8.0's local model servers charge
+    # nothing per token.
     run = _model_run(billing={"status": "unmetered", "known_subtotal_usd": 0.0})
-    assert _cost_text(run) == "$0.0000"
+    assert _cost_text(run) == "$0.0000 (unmetered)"
 
 
 def test_a_cost_that_cannot_be_totalled_costs_one_row_not_the_table() -> None:

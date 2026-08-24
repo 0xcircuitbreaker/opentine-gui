@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
-from opentine.core import Graph, Run, Step, StepKind
+from opentine.core import Graph, Run, RunStatus, Step, StepKind
 
 from opentine_gui import pricing
 
@@ -547,3 +547,104 @@ def test_a_model_name_cannot_open_a_row_of_its_own() -> None:
     assert all("\n" not in line and "\r" not in line for line in lines)
     assert all("\n" not in name for name in quote.unknown_models)
     assert len([line for line in lines if line.lstrip().startswith("total")]) == 1
+
+
+# ---- opentine 0.8.0: time-of-day cards and unmetered local servers ----------
+
+
+def _scheduled_run(hour_utc: int, provider: str = "deepseek") -> Any:
+    """A run whose one model step ran at a fixed UTC instant.
+
+    01:00-04:00 UTC on a Wednesday is inside the peak window the bundled
+    catalog's DeepSeek V4 cards carry; 12:30 is outside it.
+    """
+    when = datetime(2026, 8, 19, hour_utc, 30, tzinfo=UTC)
+    graph = Graph()
+    graph.add(
+        Step(
+            id="m1",
+            parent_ids=[],
+            kind=StepKind.model,
+            inputs={"text": "x"},
+            model_info="deepseek-v4-pro",
+            provider=provider,
+            timestamp=when.timestamp(),
+            usage={"input": 1_000_000, "output": 1_000_000},
+        )
+    )
+    return Run(
+        id=f"h{hour_utc}",
+        graph=graph,
+        status=RunStatus.completed,
+        created_at=when.timestamp(),
+    )
+
+
+def test_a_scheduled_card_is_priced_at_the_window_the_step_ran_in() -> None:
+    # opentine-pricing/2 (0.8.0) gave rate cards peak/off-peak windows, chosen by
+    # the instant a step was recorded. Billing from the as-of *date* alone prices
+    # every scheduled card at its base rate — which for DeepSeek is the off-peak
+    # one, so a peak run reported half of what it cost.
+    peak = pricing.quote_run(_scheduled_run(3))
+    off_peak = pricing.quote_run(_scheduled_run(12))
+    if not peak.available:  # no catalog in this environment
+        pytest.skip("no pricing catalog available")
+    assert peak.total_usd > off_peak.total_usd
+    assert peak.total_usd == pytest.approx(off_peak.total_usd * 2, rel=1e-6)
+
+
+def test_the_console_and_tine_price_agree_across_a_peak_window() -> None:
+    upstream = pytest.importorskip("opentine._pricing_pass")
+    for hour in (3, 12):
+        run = _scheduled_run(hour)
+        quote = pricing.quote_run(run)
+        if not quote.available:
+            pytest.skip("no pricing catalog available")
+        assert quote.total_usd == pytest.approx(upstream.price_run(run).total_cost)
+
+
+def test_a_recovered_provider_is_also_priced_at_its_window() -> None:
+    # The path that has to compute locally: a pre-0.8.0 artifact records no
+    # provider, so opentine's own pass answers "unknown" and the console's
+    # rollup takes over. It must select the window too.
+    peak = pricing.quote_run(_scheduled_run(3, provider=""), assume_provider="deepseek")
+    off_peak = pricing.quote_run(_scheduled_run(12, provider=""), assume_provider="deepseek")
+    if not peak.available:
+        pytest.skip("no pricing catalog available")
+    assert peak.total_usd == pytest.approx(off_peak.total_usd * 2, rel=1e-6)
+    assert peak.assumed_provider == "deepseek"
+
+
+def test_a_step_recorded_unmetered_says_so_rather_than_only_unknown() -> None:
+    # 0.8.0 made thirteen local model servers nameable, all recorded unmetered.
+    # No catalog carries a card for one, so the post-hoc status is "unknown" —
+    # a statement about the catalog, which without this reads as a statement
+    # about the call.
+    graph = Graph()
+    graph.add(
+        Step(
+            id="m1",
+            parent_ids=[],
+            kind=StepKind.model,
+            inputs={"text": "x"},
+            model_info="llama-3.3-70b",
+            provider="vllm",
+            usage={"input": 1000, "output": 500},
+            billing={"status": "unmetered", "known_subtotal_usd": 0.0},
+        )
+    )
+    quote = pricing.quote_run(Run(id="local", graph=graph, status=RunStatus.completed))
+    if not quote.available:
+        pytest.skip("no pricing catalog available")
+    assert quote.unmetered_at_capture == 1
+    lines = pricing.quote_lines(quote)
+    assert any("unmetered" in line and "local server" in line for line in lines)
+    # And it is still not counted as priced: the catalog answered nothing.
+    assert quote.priced == 0
+
+
+def test_status_counts_carry_the_catalogs_own_vocabulary() -> None:
+    quote = pricing.quote_run(_scheduled_run(3))
+    if not quote.available:
+        pytest.skip("no pricing catalog available")
+    assert quote.status_counts == {"complete": 1}

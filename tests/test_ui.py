@@ -755,8 +755,12 @@ def test_typing_in_the_filter_does_not_rebuild_the_table_until_the_debounce_expi
     assert _row_ids(fake_dpg) == ["alpha"]
     gui._apply_deferred_writes()
     assert _row_ids(fake_dpg) == ["alpha"]
-    # Age the pending edit rather than sleeping through the debounce.
-    gui._filter_dirty_at -= app.FILTER_DEBOUNCE_SECONDS
+    # Age the pending edit rather than sleeping through the debounce. Well past
+    # it, not exactly onto it: `time.monotonic()` is granular to ~16 ms on
+    # Windows, so two calls a few microseconds apart return the same float and
+    # the comparison lands on the boundary, where the rounding of
+    # `dirty - 0.15` decides the outcome.
+    gui._filter_dirty_at -= app.FILTER_DEBOUNCE_SECONDS + 1.0
     gui._apply_deferred_writes()
     assert _row_ids(fake_dpg) == ["No runs match this filter"]
     assert "0/1 run(s) shown" in fake_dpg.value("status_bar")
@@ -771,8 +775,8 @@ def test_preferences_are_not_written_on_every_keystroke(
     _fire(fake_dpg, "run_filter", "alp")
     gui._apply_deferred_writes()
     assert not preferences.exists()  # no disk write per character
-    gui._preferences_dirty_at -= app.PREFERENCES_FLUSH_SECONDS
-    gui._filter_dirty_at -= app.FILTER_DEBOUNCE_SECONDS
+    gui._preferences_dirty_at -= app.PREFERENCES_FLUSH_SECONDS + 1.0
+    gui._filter_dirty_at -= app.FILTER_DEBOUNCE_SECONDS + 1.0
     gui._apply_deferred_writes()
     assert '"last_filter": "alp"' in preferences.read_text()
 
@@ -783,7 +787,7 @@ def test_a_filter_opentine_cannot_parse_falls_back_to_a_text_search(
     _write(tmp_path, _run("alpha"))
     gui = gui_factory(tmp_path)
     _fire(fake_dpg, "run_filter", "cost:>abc")
-    gui._filter_dirty_at -= app.FILTER_DEBOUNCE_SECONDS
+    gui._filter_dirty_at -= app.FILTER_DEBOUNCE_SECONDS + 1.0
     gui._apply_deferred_writes()
     assert "falling back to a plain text search" in fake_dpg.value("status_bar")
 

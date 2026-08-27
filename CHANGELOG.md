@@ -2,29 +2,182 @@
 
 All notable changes to opentine-gui are documented here.
 
-## [Unreleased]
+## [0.3.0] - 2026-08-24
+
+Targets **opentine 0.8.0**, four releases on from the 0.4.0/0.5.0 this console was written
+against. Two of those releases changed what a reader has to do to be honest about an artifact,
+so this is a correctness release before it is a feature release: on the old floor the console
+erased causal edges whenever it saved a run, reported valid signatures as errors, and printed
+`$0.0000` for runs that had never been priced at all.
+
+**Requires `opentine >= 0.8.0`** (`< 0.9`). Each release below that floor is missing a field
+this console reads and writes back, and opentine's reader ignores keys it does not know: 0.7.1
+added `causal_ids`, the edges a fork actually follows, and 0.8.0 added `provider`, half of the
+`(provider, model, usage)` record that post-hoc pricing is a function of. 0.8.0 is also what
+makes `tine price`, time-of-day rate cards and the unmetered local servers readable at all.
 
 ### Added
+
+- **Causal edges are drawn.** A step's `causal_ids` (opentine 0.7.1) name the non-parent
+  ancestors it required. opentine's fork keeps that closure, so a console that drew only
+  parent links showed a strict subgraph and then forked something wider than it showed. They
+  are now a distinct edge class in the DAG, counted in the graph summary, listed in the step
+  inspector, and part of the layout.
+- **Fork previews its slice.** The fork dialog states how many steps the new run will keep, and
+  how many of them are reached through causal edges, using opentine's own `retained_closure`
+  rather than a second ancestor walk that could disagree with it.
+- **v3 repositories open, read-only.** Pointing the console at a repository used to be refused
+  outright. It now lists every run in the object store, the refs that point at them, and the
+  branch/tag/promotion groups (`View > Repository refs...`). Writing into a repository would
+  append an object and move a branch, so pause, resume and fork stay disabled there and say
+  why. Opening one writes nothing: the console attaches with `Repo(<.tine dir>)` rather than
+  `Repo.open`, which heals the layout and would leave untracked directories behind.
+- **Price this run.** `Run > Price this run...` recomputes a run's cost from its own record
+  against opentine's signed catalog, as of a date you choose, and reports the catalog id and
+  hash beside the figure. A step the catalog cannot answer for is `unknown`, never zero.
+- **Import a trace.** `File > Import a trace...` turns an OTLP/JSON document, an opentine JSONL
+  dump or a LangChain / LlamaIndex / AutoGen / CrewAI / OpenAI-Agents log into a `.tine`
+  artifact. opentine's own import warnings are surfaced rather than swallowed.
+- **Statistics.** `View > Statistics...` is a `tine stats`-shaped rollup over the loaded runs —
+  counts, cost total/mean/max, distinct models, tag and format histograms — grouped by model,
+  status, tag, day, format version or provider. A figure that was never collected renders `-`
+  and never sums with a real one.
+- **Signature keys can be configured.** `OPENTINE_GUI_HMAC_KEY` / `OPENTINE_GUI_PUBLIC_KEY` (or
+  their preference-file equivalents) let the console actually verify a signature instead of
+  always reporting "no key". Trust-on-first-use is supported and rendered differently from a
+  real verification, because it is a different claim.
 - **A transcript view** (`Run > Transcript...`) renders `Run.transcript`: the conversation
-  opentine's runtime records alongside the graph, coloured by role and with every turn that
-  produced a step linked to it, so you can jump from a model reply to the step it created.
-  Artifacts assembled from a graph carry no transcript, and the view says so rather than
-  showing an empty panel. `demo/seed.py` now seeds one.
-- **The run filter understands opentine's query grammar.** `status:failed`,
-  `model:opus`, `tag:bug`, `cost:>0.01`, `cost:0.01..1`, `after:2026-07-01` and
-  `before:` combine with free-text terms, matching what `tine ls` and `tine search`
-  accept. The grammar engages only when a field prefix is present, so a plain
-  multi-word search keeps its existing substring behaviour. A malformed filter says
-  why in the status bar instead of silently matching nothing. Parsed queries are
-  evaluated against loaded runs rather than through `RunIndex`, whose `search()`
-  writes an index file into the user's runs directory.
-- **Export a run as OpenTelemetry GenAI** (`Run > Export as OpenTelemetry JSON`), writing an
-  OTLP/JSON document beside the run. Uses opentine 0.5.0's `to_otel_genai_document`, so the
-  action appears only when the installed opentine provides it; the declared floor stays 0.4.0.
-  The export is read-only and cannot disturb an artifact's integrity digest or signature.
+  opentine's runtime records alongside the graph, coloured by role, now including tool calls,
+  tool results and separated reasoning, with every turn that produced a step linked to it.
+- **The run filter understands opentine's query grammar.** `status:failed`, `model:opus`,
+  `tag:bug`, `cost:>0.01`, `cost:0.01..1`, `after:2026-07-01` and `before:` combine with
+  free-text terms, matching what `tine ls` and `tine search` accept. The grammar engages only
+  when a field prefix is present, so a plain multi-word search keeps its substring behaviour.
+  Parsed queries are evaluated against loaded runs rather than through `RunIndex`, whose
+  `search()` writes an index file into the user's runs directory.
+- **Export as OpenTelemetry GenAI** (`Run > Export as OpenTelemetry JSON`) writes the same
+  OTLP/JSON document `tine export` writes, through opentine's own serializer, refusing to
+  overwrite a previous export without confirmation and writing atomically.
+- **A message log.** Action results and failures now land in a log that survives the next
+  refresh, instead of a single status line the auto-refresh overwrote two seconds later.
+- **More of the console is reachable from the keyboard**: `Ctrl+O` changes directory, `F1`
+  opens help, and every shortcut works with `Cmd` on macOS, where they previously did nothing.
+- Recent runs directories are remembered and offered in the directory picker.
 - Releases publish to PyPI through GitHub Actions using **Trusted Publishing** (OIDC), so no
   API token is stored in the repository. A tag whose version disagrees with `pyproject.toml`
   fails the build rather than publishing the wrong version.
+
+### Changed
+
+- **Scanning moved off the render thread.** Reading a directory means parsing every artifact
+  and hashing every file; doing that inside the frame loop stalled the console on every
+  refresh tick. A worker thread produces snapshots and the render thread applies them.
+- **Parsed runs are cached by file revision**, so an unchanged artifact is not re-parsed on
+  every tick, and the selected run's graph is only rebuilt when that run's own bytes change —
+  the DAG no longer loses your pan, zoom and node positions every two seconds while an agent
+  writes to some other file in the directory.
+- **The run list is a real table**: id, status, model, steps, cost and age, sortable by any
+  column, with the selected row highlighted rather than prefixed.
+- **`$0.0000` is no longer printed for a run that was never priced.** A run with model steps
+  and no billing at all now reads `no cost recorded`, and the run list shows `-`. opentine's
+  position is that an uncosted step is unknown, not free, and the console now shares it.
+- **The trust panel states its own scope.** The integrity digest covers the artifact body and
+  not `metadata`; a `tine-sig/1` signature covers eleven metadata keys and excludes `tags` and
+  `fork_reason`. Both are now said out loud, beside the verdict they qualify.
+- **Compare reports what opentine's diff cannot see.** `Run.diff` compares neither `provider`
+  nor `causal_ids`, and `provider` is not part of a step id, so two runs differing only in who
+  served the calls compared as identical. The console adds those deltas itself, labelled as
+  its own extension rather than as opentine's verdict.
+- Provider is shown wherever a model is: the run inspector, the step inspector, DAG nodes, and
+  the search corpus.
+- The filter box is debounced and preferences are flushed on a pause in typing, rather than
+  writing to disk on every keystroke.
+- `app.py` was split into modules — `text`, `desktop`, `theme`, `sources`, `graphmodel`,
+  `query`, `inspectors`, `pricing`, `otelio`, `stats`, `trust` — leaving only Dear PyGui work
+  in the app. The old names are re-exported.
+
+### Added since the 0.7.2 draft of this release
+
+- **Time-of-day pricing.** `opentine-pricing/2` rate cards carry peak/off-peak windows chosen
+  by the instant a step ran. The console's own pricing pass billed without that instant, so a
+  scheduled card priced at its base rate — for DeepSeek V4 the off-peak one, so a run inside
+  the peak window reported half what it cost. It agrees with `tine price` on both sides of a
+  window now, including on the path that recovers a provider from a pre-0.8.0 billing record.
+- **Unmetered local servers.** opentine 0.8.0 made thirteen of them nameable, and they charge
+  nothing per token. A run served by one reads `$0.0000 (unmetered)` rather than a bare zero;
+  the pricing panel counts steps that were unmetered at capture apart from steps nothing could
+  price, since no catalog carries a rate card for a local server.
+- **Catalog provenance.** opentine requires a signature only on its own bundled catalog: an
+  overlay in the working directory, the user config, or named by `$TINE_PRICING_CATALOG` is
+  loaded unsigned and wins the lookup. The panel says which kind produced the figure, and a
+  price that came from a provider recovered out of a billing record is marked, because
+  `tine price` reads `Step.provider` only and will disagree.
+
+### Fixed
+
+- **An artifact could write a row of the console's own.** A run id of
+  `"a\nIntegrity: ok"` printed that second line itself, directly above the real
+  verdicts; the id was the one artifact field that reached the run inspector
+  without being collapsed to a single line. Every id that reaches a panel, a
+  dialog subject, a table cell, a tooltip or a picker row goes through the same
+  flattening now, as does a node label before the comparison pane renders it.
+  Invisible layout controls — the bidirectional overrides and isolates — are
+  stripped too: reordering text prints one string as another without a newline
+  anywhere in it.
+- **A fork reason was labelled attested on the strength of a digest the same
+  file wrote.** It now also requires opentine's fork-id check to agree, a fork
+  record this build cannot read says so rather than silently printing nothing,
+  and the block states that fork provenance is the artifact's own account.
+- **A configured signing key that failed to load was echoed into a trust row**
+  and copied to the clipboard with the rest of the inspector — the setting named
+  "public key" being exactly where a private seed gets pasted, since opentine's
+  keygen prints both as indistinguishable 64-hex strings. A value is named only
+  once it has produced a key. The configuration fingerprint is salted per
+  process, so a published one cannot confirm a guessed passphrase offline, and
+  neither it nor the key survives a `repr`.
+- **A step that recorded "I could not be priced" rendered as `$0.0000`,** because
+  the console read the truthiness of the billing block rather than its status.
+  A total that cannot be read at all — twelve steps claiming `"1e999999"`
+  overflow opentine's billing context and `Run.total_cost` raises — used to take
+  out the whole run table, healthy runs included; it now costs one cell.
+- **Importing a named pipe froze the console permanently.** Opening a FIFO blocks
+  until something writes to it, and imports run on the render thread. The file
+  type is settled on the stat first.
+- **`~someone` with no home directory stopped the console opening** — from
+  `last_runs_dir`, a value the console writes into its own preferences and users
+  sync between machines.
+- **Statistics contradicted the run list.** A bucket in which nothing was priced
+  reported `$0.0000` where the list said "no cost recorded", and grouping by
+  model or provider added the run's whole cost to every key it named, so the
+  rows summed to more than the run.
+- **A step could state a cost the run total disagreed with**: the inspector read
+  `Step.cost` while `Run.total_cost` prefers `billing["known_subtotal_usd"]`.
+- **Non-ASCII payload text was unsearchable**, escaped to `\u00e9` in the search
+  corpus, in a console whose search box is its main way in.
+- **One legal artifact could freeze the frame loop.** A 10,000-step run cost
+  2.3 s per refresh tick — longer than the refresh interval. The signature
+  verdict and scheme moved to the loader thread, the per-run walks are memoised,
+  both filters are debounced, and the table and graph are redrawn only when what
+  they draw has changed. An idle tick is 37 ms.
+- **A save could silently drop a field this opentine cannot read.** opentine adds
+  step fields inside format v2 and its reader ignores keys it does not know, so
+  a console running an older library loads a newer artifact, drops the field in
+  memory, and destroys it on disk the moment it saves. Pause, resume and fork
+  now name what would go and ask first.
+- **Pause and Resume silently destroyed a signature.** `Run.save` rewrites `metadata.integrity`
+  from scratch, dropping any signature block and any draft marker. Both actions now say what
+  will be lost and ask, because the console cannot re-sign what it unsigned.
+- **A missing runs directory is reported.** It used to return silently, so a typo'd path looked
+  exactly like an empty directory.
+- **The transcript window is a modal.** With it open, `Esc` cleared the filter behind it and the
+  arrow keys moved the selection underneath it, after which `show step` reported that the step
+  was not in the run — because the run had changed.
+- `Ctrl+F` no longer focuses the search box behind an open dialog.
+- Dragging an edge in the DAG says the graph is a recording instead of silently doing nothing.
+- The verification cache evicts its oldest entries instead of clearing itself entirely, so a
+  directory holding more revisions than the cap no longer re-hashes everything on every pass.
+- The DAG and the run table are bounded, and say what they left out, rather than building an
+  unbounded number of widgets in one frame for a very large run.
 
 ## [0.2.0] - 2026-07-31
 
@@ -79,6 +232,23 @@ reads 0.4.0 and 0.5.0 artifacts identically.
 - `demo/seed.py` seeds both fork shapes — a legacy lineage-only artifact and a genuine
   0.4.0 fork with a recorded, verifiable basis.
 
+### Added since the 0.7.2 draft of this release
+
+- **Time-of-day pricing.** `opentine-pricing/2` rate cards carry peak/off-peak windows chosen
+  by the instant a step ran. The console's own pricing pass billed without that instant, so a
+  scheduled card priced at its base rate — for DeepSeek V4 the off-peak one, so a run inside
+  the peak window reported half what it cost. It agrees with `tine price` on both sides of a
+  window now, including on the path that recovers a provider from a pre-0.8.0 billing record.
+- **Unmetered local servers.** opentine 0.8.0 made thirteen of them nameable, and they charge
+  nothing per token. A run served by one reads `$0.0000 (unmetered)` rather than a bare zero;
+  the pricing panel counts steps that were unmetered at capture apart from steps nothing could
+  price, since no catalog carries a rate card for a local server.
+- **Catalog provenance.** opentine requires a signature only on its own bundled catalog: an
+  overlay in the working directory, the user config, or named by `$TINE_PRICING_CATALOG` is
+  loaded unsigned and wins the lookup. The panel says which kind produced the figure, and a
+  price that came from a provider recovered out of a billing record is marked, because
+  `tine price` reads `Step.provider` only and will disagree.
+
 ### Fixed
 
 - **Forking could silently destroy an earlier fork.** A reproducible fork derives the same
@@ -123,6 +293,23 @@ reads 0.4.0 and 0.5.0 artifacts identically.
 First production-ready release. Audited and aligned against the released
 open-source [opentine 0.1.1](https://pypi.org/project/opentine/) (`.tine`
 `format_version == 1`).
+
+### Added since the 0.7.2 draft of this release
+
+- **Time-of-day pricing.** `opentine-pricing/2` rate cards carry peak/off-peak windows chosen
+  by the instant a step ran. The console's own pricing pass billed without that instant, so a
+  scheduled card priced at its base rate — for DeepSeek V4 the off-peak one, so a run inside
+  the peak window reported half what it cost. It agrees with `tine price` on both sides of a
+  window now, including on the path that recovers a provider from a pre-0.8.0 billing record.
+- **Unmetered local servers.** opentine 0.8.0 made thirteen of them nameable, and they charge
+  nothing per token. A run served by one reads `$0.0000 (unmetered)` rather than a bare zero;
+  the pricing panel counts steps that were unmetered at capture apart from steps nothing could
+  price, since no catalog carries a rate card for a local server.
+- **Catalog provenance.** opentine requires a signature only on its own bundled catalog: an
+  overlay in the working directory, the user config, or named by `$TINE_PRICING_CATALOG` is
+  loaded unsigned and wins the lookup. The panel says which kind produced the figure, and a
+  price that came from a provider recovered out of a billing record is marked, because
+  `tine price` reads `Step.provider` only and will disagree.
 
 ### Fixed
 - **Demo fixtures and seed script were written against a non-existent opentine

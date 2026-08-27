@@ -1,7 +1,8 @@
 # GUI QA Checklist
 
-This checklist covers the current `opentine-gui` feature contract and the
-graph-first expectations used for the Karpathy LLM Wiki-inspired pass.
+This checklist is the console's feature contract: every box below is either
+covered by the automated suite or is a manual check with a stated reason why it
+cannot be automated. It targets **opentine 0.7.2**.
 
 ## Baseline Data
 
@@ -16,6 +17,15 @@ Use a disposable runs directory with:
 - A genuine 0.4.0 fork with a derived id, a recorded `metadata["fork"]` basis and
   an attested `fork_reason`.
 - One corrupt `.tine` file to verify load errors.
+- A run carrying `causal_ids` (a step that required a non-parent step).
+- A run with model steps, real token usage and no recorded cost at all — what an
+  imported trace looks like.
+- A signed run (`Run.save(path, sign_key=...)`), to exercise the trust panel and
+  the confirmation before a save that would drop the signature.
+- A v3 repository with at least two refs, to exercise the read-only source.
+
+`demo/seed.py` writes all of the above, including the repository beside the runs
+directory.
 
 ## Feature Coverage
 
@@ -65,6 +75,55 @@ Use a disposable runs directory with:
   platform config directory (see Cross-platform Coverage) unless
   `OPENTINE_GUI_PREFS` points at another preference file.
 
+## Sources
+
+- [x] A directory of `.tine` files is readable and writable.
+- [x] A v3 repository opens read-only: its runs are listed, the refs pointing at
+  each run are shown, `View > Repository refs...` groups heads/tags/promotions,
+  and pause, resume and fork are disabled with a reason rather than silently
+  inert.
+- [x] Opening a repository writes nothing to it — asserted by comparing the whole
+  directory tree before and after a scan, because `Repo.open` would heal the
+  layout and leave untracked directories behind.
+- [x] A missing or unreadable runs directory is reported as an error, not shown
+  as an empty one.
+- [x] Scanning happens on a worker thread; the UI stays responsive while a large
+  directory is read, and the worker never touches Dear PyGui.
+- [x] An unchanged file is not re-parsed on the next tick, and the selected run's
+  graph is not rebuilt (losing pan, zoom and node positions) unless that run's
+  own bytes changed.
+
+## Cost and Pricing Coverage
+
+- [x] A run that recorded no price at all reads `no cost recorded`, not `$0.0000`.
+- [x] A partially priced run reads `>=`, with the count of unpriced invocations.
+- [x] `Run > Price this run...` recomputes from opentine's signed catalog, names
+  the catalog id and hash, and reports `unknown` (never zero) for a step the
+  catalog cannot answer for.
+- [x] Pricing accepts an as-of date, and reports which rule was applied
+  (`recorded` versus a pinned day).
+- [x] A step with no recorded provider can be priced against a provider the
+  reader picks, and every figure derived from that choice is marked assumed.
+- [x] `View > Statistics...` groups by model, status, tag, day, format version and
+  provider; a figure that was never collected renders `-` and never sums, and the
+  grouped rows add up to the headline (a step naming no provider has a bucket of
+  its own rather than leaving its spend out of the breakdown).
+- [x] A scheduled (`opentine-pricing/2`) rate card is priced at the window the
+  step actually ran in, matching `tine price` on both sides of a peak window.
+- [x] A run served by a local model server reads `$0.0000 (unmetered)`, and the
+  pricing panel counts unmetered steps apart from unpriced ones.
+- [x] The pricing panel names the catalog and whether it was signed; an unsigned
+  overlay is never presented as opentine's signed catalog.
+
+## Interop Coverage
+
+- [x] `Run > Export as OpenTelemetry JSON` writes the same document `tine export`
+  writes, refuses to overwrite without confirmation, writes atomically, and
+  leaves the artifact byte-identical.
+- [x] `File > Import a trace...` turns an OTLP/JSON, JSONL or framework log into a
+  `.tine` artifact, refuses an unsafe or colliding destination, cleans up its
+  temporary workspace on every path, and surfaces opentine's import warnings.
+
 ## Trust and Provenance Coverage
 
 - [x] A fork reason that does not reproduce the signed `metadata.fork.intent` digest
@@ -75,7 +134,20 @@ Use a disposable runs directory with:
   the run as a root.
 - [x] A budget-killed run reports the breached dimension and the overage.
 - [x] Forking refuses to overwrite an existing artifact (the reproducible-id case).
-- [x] A v3 repository directory is reported as such, not half-opened.
+- [x] The integrity row states that the digest excludes `metadata`, and the
+  signature row names the scheme (`tine-sig/1` covers eleven metadata keys and
+  excludes `tags` and `fork_reason`; `tine-sig/2` covers all but `integrity`).
+- [x] With `OPENTINE_GUI_HMAC_KEY` or `OPENTINE_GUI_PUBLIC_KEY` configured, a
+  genuine signature reads `verified`; a wrong key reads as a mismatch; a
+  trust-on-first-use result is rendered differently from a real verification.
+- [x] Pause and Resume ask before a save that would drop a signature or a draft
+  marker, and write nothing if the confirmation is declined.
+- [x] Causal edges are drawn apart from lineage, counted in the graph summary, and
+  listed in the step inspector; the fork dialog states the slice the fork will
+  keep using opentine's own `retained_closure`.
+- [x] Compare reports `provider` and `causal_ids` differences, which opentine's
+  own `Run.diff` does not compare — including for two v3 repository runs, whose
+  step ids differ entirely because `provider` is inside the content address.
 
 ## Keyboard Coverage
 
@@ -85,9 +157,13 @@ Use a disposable runs directory with:
 - [x] `Esc` closes an open dialog first, then clears the DAG filter, then the run search.
 - [x] `Ctrl+F` focuses search, `Ctrl+C` copies the selected run id, `Ctrl+R` forces a
   reload on the very next frame — including in an empty directory, where a
-  cleared-signature approach would silently do nothing.
-- [x] Keyboard-driven selection is deferred to the render thread, not applied from the
-  key-handler thread.
+  cleared-signature approach would silently do nothing. `Ctrl+O` opens the
+  directory picker and `F1` opens help.
+- [x] On macOS the same chords work with `Cmd`.
+- [x] `Ctrl+F` does not focus the search box behind an open dialog.
+- [x] Every modal — including the transcript, the text viewer, the panel views and
+  the confirmation — counts as a modal for `Esc` and for navigation keys.
+- [x] Keyboard-driven selection is applied between frames rather than mid-frame.
 
 ## Cross-platform Coverage
 
@@ -107,26 +183,30 @@ Use a disposable runs directory with:
 
 ## Verification
 
-Every checklist item above is covered by the automated suite, by the scripted
-GUI drive described in `docs/design-notes.md`, or both. CI runs lint and the
-full suite on Windows, macOS and Linux across Python 3.11-3.14, and verifies
-the bundled fixtures load and pass their integrity digests.
+Every checklist item above is covered by the automated suite. Widget-level
+behaviour is covered too: `tests/fakedpg.py` is a recording stand-in for Dear
+PyGui, installed for every test, so callbacks, table rendering, DAG construction
+and modal behaviour are all exercised without a display. CI runs lint and the
+full suite on Windows, macOS and Linux across Python 3.11-3.14, and verifies the
+bundled fixtures load and pass their integrity digests.
+
+What the stand-in cannot check is what the native library actually draws:
+layout, hit testing, fonts and the node editor's own interaction. Those remain a
+manual pass against `demo/seed.py` output.
 
 ## Remaining Product Gaps
 
-- True GUI automation is still manual because Dear PyGui is not covered by the
-  headless pytest suite.
-- The DAG is readable for small and medium runs; very large runs will need
-  clustering, pan-to-selection, and graph search to feel like a high-end wiki UI.
-- DAG search now highlights matching nodes (2026-07-29), but it does not pan/zoom
-  to matches or provide next/previous match navigation.
-- Run diff and budget landed 2026-07-30; branch-aware forking landed 2026-07-31.
-  Still unsurfaced from opentine 0.3.0/0.4.0: `Run.transcript` (a linear
-  conversational view), tag editing via `add_tag`/`remove_tag`, the query DSL
-  (`RunIndex`/`parse_query`), and repository-backed runs (`Repo`).
+- Real rendering is still verified by eye. The stand-in proves the console asks
+  for the right widgets, not that Dear PyGui draws them correctly.
+- Very large runs are drawn up to a stated cap; clustering and pan-to-node would
+  be needed to make a several-thousand-step graph genuinely navigable. `Next
+  match` scrolls to a highlighted step, but there is no zoom-to-fit.
+- Not surfaced from opentine: tag editing (`add_tag`/`remove_tag` — needs a save
+  path that does not destroy a signature), `tine replay --verify` as a
+  determinism badge, the v3 mutating verbs (`repo-fork`, `attest`, `evaluate`,
+  `promote`), and OTLP/HTTP push. The reasons for each are in
+  `docs/design-notes.md`.
 - CJK text needs `OPENTINE_GUI_FONT` pointed at a CJK-capable face; Dear PyGui
   binds a single font atlas, so there is no automatic per-script fallback.
-- There is no persistent user preference layer for window size or panel widths.
-- Wiki-style traceability is limited to opentine run/step metadata. Future
-  high-end passes should add richer source/citation links when opentine records
-  those references in `.tine` files.
+- Window size and panel widths are not persisted; the runs directory, filter,
+  sort order and pricing choices are.

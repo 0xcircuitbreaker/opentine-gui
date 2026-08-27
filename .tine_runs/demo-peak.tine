@@ -1,0 +1,74 @@
+{
+  "cache": {},
+  "created_at": 1787110200.0,
+  "format_version": 2,
+  "graph": {
+    "order": [
+      "d1",
+      "d2"
+    ],
+    "steps": {
+      "d1": {
+        "billing": {
+          "known_subtotal_usd": 2.112,
+          "status": "complete"
+        },
+        "cost": 2.112,
+        "duration": 12.0,
+        "error": {},
+        "id": "d1",
+        "inputs": {
+          "text": "Draft the quarterly summary."
+        },
+        "kind": "model",
+        "model_info": "deepseek-v4-pro",
+        "outputs": {
+          "text": "Four pages, six charts."
+        },
+        "parent_ids": [],
+        "provider": "deepseek",
+        "timestamp": 1787110200.0,
+        "tool_info": {},
+        "usage": {
+          "input": 1000000,
+          "output": 200000,
+          "total": 1200000
+        }
+      },
+      "d2": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "d2",
+        "inputs": {
+          "text": "Summary drafted."
+        },
+        "kind": "done",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [
+          "d1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "3decd870066e520cce0538f02d4d1607928a48c89c35dd5ddbdb4068a2874c2b"
+    },
+    "model_info": "deepseek-v4-pro",
+    "system_prompt": "",
+    "user_prompt": "Draft the quarterly summary."
+  },
+  "policies": {},
+  "refs": {
+    "main": "d2"
+  },
+  "run_id": "demo-peak",
+  "status": "completed",
+  "transcript": []
+}

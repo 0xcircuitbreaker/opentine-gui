@@ -43,10 +43,13 @@ imported defensively: a rename must cost one advisory line, not the app.
 
 These are not documented anywhere obvious and each one caused a real crash:
 
-- **Callbacks run on a separate thread.** All of them, not just resize. Creating
-  and deleting node-editor items from a callback races the renderer and crashes
-  natively. The app sets `manual_callback_management=True` and drains the queue
-  itself between frames, so every callback runs on the render thread.
+- **Callbacks run on a separate thread by default.** All of them, not just
+  resize. Creating and deleting node-editor items from a callback races the
+  renderer and crashes natively. The app sets `manual_callback_management=True`
+  and drains the queue itself between frames, so every callback — key handlers
+  included — actually runs on the render thread. The viewport resize callback is
+  the one Dear PyGui may still deliver on its own thread, so it records intent
+  and `_apply_pending_relayout` does the work.
 - **Node-editor links live in slot 0, nodes in slot 1.** Deleting a node while a
   link still references it segfaults. `_clear_dag()` deletes links first.
 - **The built-in font atlas is ASCII-only.** Accented text, dashes and arrows in
@@ -58,8 +61,121 @@ These are not documented anywhere obvious and each one caused a real crash:
   at load, but paths from `argv` and preferences do not pass through opentine.
 - **Item themes override the global theme**, so a scaled style var has to be
   repeated in every item theme or that widget silently ignores the display scale.
+- **A table column cannot be hidden from code.** `configure_item(column,
+  show=False)` is ignored, and `default_hide=True` does not take either — both
+  verified against Dear PyGui 2.2. So the run table carries the columns that fit
+  the narrowest sane sidebar and hands the rest to the reader through the header
+  menu (`hideable=True`), with the row tooltip carrying what no column can.
 - **`dpg.output_frame_buffer` is flaky** — it aborts intermittently under a GIL
   assertion. That affects screenshot tooling only; the app never calls it.
+
+## Scanning happens on a worker thread; drawing never does
+
+Reading a runs directory means parsing every artifact and hashing every file for
+its integrity digest, and a v3 repository read costs one to two orders of
+magnitude more per item than a flat file. All of that used to happen inside the
+frame loop, so the console stalled on every refresh tick and again on every
+selection.
+
+`app._Loader` owns a thread that computes a cheap source signature, rescans when
+it changes, and puts a finished `Snapshot` on a queue. The render thread drains
+that queue between frames. The rule that keeps this safe is absolute: **the
+worker never touches Dear PyGui**. It returns plain data — runs, errors, paths —
+and every widget call happens on the render thread.
+
+The worker also pays the trust checks. `load_runs` always warmed the integrity
+digest, but the signature verdict and the signature scheme were first computed
+in the frame that drew a run, and each re-parses the whole artifact: 0.9 s on a
+5 MB file, on the render thread, per click. They are cached per file revision
+either way, so the loader spends a bounded few seconds computing them up front
+and the click costs nothing.
+
+Two caches make repeat scans cheap.
+
+A third, for v3 objects, is keyed by `(store, object id, the object file's own
+revision)`. Content addressing says an object's bytes cannot legitimately
+change, which is why the cache does not expire on time — but an id names bytes,
+not a store, and the trust row promises that every object is verified on read.
+Keying by id alone served one repository's run for another's, and kept serving a
+run whose object had been replaced with garbage under an open console. Parsed runs are keyed by file revision
+(path, mtime, ctime, size, inode), which is the same key the verification cache
+uses, so an unchanged file is parsed once. v3 objects are content-addressed, so
+their cache never needs invalidating at all. Both evict oldest-first rather than
+clearing wholesale: a full clear at the cap makes a directory holding more
+revisions than the cap re-do all its work on every pass, which is precisely the
+busy directory the cache exists for.
+
+Derived views of a run — its depth map, its causal edges, its per-step search
+text, its total cost, its cost breakdown — are memoised per run object, because
+the panels ask the same question about the same run several times per render.
+The one that mattered most was the per-step search text: the design notes
+already recorded caching the *run* search text for the same reason, and leaving
+the step-level equivalent uncached cost 1.6 s per DAG-filter keystroke on a
+15,000-step run. Both filters are debounced.
+
+The selected run's graph is rebuilt only when that run's own bytes change, and
+the run table is redrawn only when what it would draw changed.
+Rebuilding resets pan, zoom, node positions and node selection, and a directory
+where one agent is writing changes its directory-wide signature every couple of
+seconds — so the old behaviour threw the user's view away while they were
+reading it.
+
+## Two sources, one panel set
+
+`sources.py` presents a directory of `.tine` files and a v3 repository as the
+same `Snapshot` of `RunEntry` rows, so the panels do not branch on which is open.
+The differences that matter are carried on the snapshot rather than inferred:
+
+- `writable` is False for a repository, and every write action is disabled with a
+  reason. `Run.save` into a repository appends an object *and moves
+  `heads/main`* — a stray Pause click there is a branch move.
+- A repository is attached with `Repo(<.tine dir>)`, never `Repo.open(path)`.
+  `open` heals the layout, mkdir-ing any missing directory under `.tine/`, which
+  leaves untracked directories in a repository someone committed to git. A
+  console that only reads must leave no trace; `tests/test_sources.py` asserts
+  the directory tree is byte-identical before and after a scan.
+- Entry keys are run ids for a directory (ids are deduped at load) and object ids
+  for a repository, where two runs may legitimately share a legacy run id.
+
+## Causal edges are part of the graph, not a footnote
+
+A step's `causal_ids` (opentine 0.7.1) names non-parent ancestors it required.
+`Run.fork` keeps the *causal* closure, so a console that drew only `parent_ids`
+showed a strict subgraph and then forked something wider than it had shown: the
+preview and the result disagreed. They are now a second edge class in the node
+editor, a term in the layout depth, a count in the graph summary, and a line in
+the step inspector. The fork dialog states the slice size using opentine's own
+`retained_closure`, because 0.6.0 extracted that helper precisely to stop a
+second, independently computed preview from being wrong.
+
+## Zero is a claim, and the console only makes it when the artifact does
+
+`Run.total_cost` sums what each step recorded at capture. A run imported from
+OpenTelemetry or a framework log recorded nothing, so it sums to `0.0` — and
+rendering `$0.0000` states a spend the artifact never claimed. The console
+distinguishes three cases: priced, partially priced (`>=`, opentine flagged
+invocations it could not price), and nothing recorded at all (`no cost
+recorded`). `Run > Price this run...` then answers the real question from
+opentine's signed catalog, reporting the catalog id and hash beside the figure,
+and reporting `unknown` for any step the catalog cannot answer for.
+
+## The suite drives the console, not a mock of it
+
+Dear PyGui segfaults the interpreter when almost any of its functions is called
+without a graphics context, which is why no test may create one. That used to
+mean each test patched the two or three `dpg` functions its code path happened
+to touch, and a new call in that path took the whole run down instead of failing
+one test.
+
+`tests/fakedpg.py` is a recording stand-in with an item registry, values,
+configuration, children and callbacks, installed for *every* test by an autouse
+fixture. A test builds the whole console (`gui_factory`), fires a real callback,
+and asserts on what the widgets were told. It is a test double, not an emulator:
+it records rather than interprets, so it proves the console asks for the right
+widgets and never that Dear PyGui draws them correctly. That part is still a
+manual pass against `demo/seed.py` output, and it is worth doing — the five-
+column run table, the causal edge colour and the modal sizes were all settled by
+looking at screenshots, not at assertions.
 
 ## Layout scales, it is not fixed
 
@@ -98,16 +214,80 @@ anything super-linear in step or depth count a UI freeze:
   inode and ctime, not just size and mtime, so a tampered file that restores its
   mtime is still caught on POSIX. See `SECURITY.md` for the Windows caveat.
 
+## A price is a computation, and it says whose
+
+`Run.total_cost` sums what capture recorded. `tine price` (opentine 0.8.0) asks
+a different question: what does the catalog say this record is worth *now*, or
+on a date you name. The console offers both, and keeps three things straight
+that are easy to run together:
+
+- **Which catalog.** opentine requires a signature only on its own bundled
+  catalog. An overlay under the working directory, in the user's config, or
+  named by `$TINE_PRICING_CATALOG` is loaded unsigned and *wins* the lookup, so
+  a figure can be whatever a file beside the runs says it is. The panel names
+  the catalog's hash and whether anything signed it, and the sentence under the
+  figure changes to match.
+- **Which window.** `opentine-pricing/2` cards carry peak/off-peak schedules,
+  and the window is chosen by the instant a step ran, not by the as-of date.
+  Billing without that instant priced every scheduled card at its base rate,
+  which for DeepSeek V4 is the off-peak one — a 2× error on a real card, in the
+  direction that flatters.
+- **Whose provider.** A rate card is keyed by provider *and* model. Artifacts
+  written before 0.8.0 have no `provider` field, but their adapter still wrote
+  it into the billing record, so the console recovers it there and prices runs
+  that `tine price` reports as unknown. That is a better answer and a different
+  one, so the panel says the step's provider was recovered. Where nothing
+  recorded a provider at all, the reader can supply one, and every figure from
+  that choice is labelled as assumed rather than as recorded.
+
+Zero has three meanings here and gets three sentences: priced and genuinely
+free, unmetered (a local server, which charges nothing per token — opentine
+0.8.0 made thirteen of them nameable), and never priced at all.
+
+## Saying what a verdict covers
+
+Two of the console's trust rows are narrower than they look, and both are stated
+rather than left to be assumed:
+
+- The integrity digest is taken over the artifact body **excluding all of
+  `metadata`**, by design — it means "internally consistent", not "genuine". So
+  tags, a fork reason, replay records and budget state can all be rewritten with
+  the digest still matching.
+- A `tine-sig/1` signature (everything opentine 0.3.0–0.7.0 wrote) covers eleven
+  metadata keys and deliberately excludes `tags` and `fork_reason`. `tine-sig/2`
+  (0.7.1+) covers every metadata key except `integrity`. `SignatureResult`
+  carries no scheme, so the console reads it out of the artifact's own JSON.
+
+Trust-on-first-use renders differently from a real verification, because it is a
+different claim: it says the file carries a key that matches its own signature,
+not that the key is one you trust.
+
+## Writes that cannot be undone from inside the app
+
+`Run.save` recomputes `metadata.integrity` from scratch. That drops any signature
+block the file carried and clears the draft marker an autosave checkpoint uses,
+and the console holds no signing key, so it cannot put either back. Pause and
+Resume therefore state what will be lost and ask first. Fork does not: a fork
+writes a *new* artifact, and a fork legitimately has no signature of its own.
+
 ## What this console deliberately does not do
 
 It is a read-mostly viewer. `Agent`, `Model`, `Recorder` and the sandbox policies
-are about *executing* agents and are out of scope. `RunIndex` is not adopted
-because `search()` writes an index file into the user's runs directory and its
-indexed text is a lossy subset that drops error messages. Repository (`.tine/`
-v3) support is refused rather than half-implemented: the console detects a
-repository and says so, because loading one would show a single run out of many
-and `Pause` would rewrite its branch.
+are about *executing* agents and are out of scope, as is `tine replay --verify`,
+which re-executes work and cannot be an incidental click. `RunIndex` is not
+adopted because `search()` writes an index file into the user's runs directory
+and its indexed text is a lossy subset that drops error messages; the query
+grammar is parsed with `parse_query` and evaluated in memory instead.
 
-Known gaps, roughly in value order: `Run.transcript` (a linear conversational
-view), tag editing (which must avoid `Run.save()`, since that destroys the
-artifact's signature), and adopting opentine's query grammar for the filter box.
+A v3 repository is read, never written. The v3 mutating verbs — `repo-fork`,
+`repo-resume`, `attest`, `evaluate`, `promote` — are deliberate provenance acts
+with CAS semantics, and a GUI button is the wrong shape for them.
+
+There is no OTLP/HTTP push: exporting to a file is a local act, while pushing
+ships prompts and completions to a network endpoint, and opentine's own refusal
+rules for that (loopback or TLS, never a silent drop) belong where the operator
+can see them.
+
+Known gaps, roughly in value order: tag editing (which has to avoid `Run.save()`,
+since that destroys the artifact's signature), a determinism badge from
+`tine replay --verify`, and pan-to-node in the DAG for very large graphs.

@@ -1,6 +1,6 @@
 [project]
 name = "opentine-gui"
-version = "0.2.0"
+version = "0.3.0"
 description = "Desktop GUI for opentine — browse, inspect, compare and fork agent runs"
 readme = "README.md"
 license = "Apache-2.0"
@@ -30,11 +30,18 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    # 0.4.0 makes a fork id identify the fork act, so forking the same step twice
-    # yields distinct runs. Below that, the GUI's fork action silently overwrites
-    # the previous fork of the same point. That is the real floor; 0.5.0 is
-    # additive over it and is what this release is tested against.
-    "opentine>=0.4.0",
+    # The floor is a correctness line, not a preference. Each release below it
+    # is missing a field this console reads and writes back, and opentine's
+    # reader ignores keys it does not know — so an older library loads a newer
+    # artifact, drops the field in memory, and destroys it on disk the moment
+    # the console saves:
+    #   0.7.1  `causal_ids`, the edges a fork actually follows
+    #   0.8.0  `provider`, half of the (provider, model, usage) record that
+    #          post-hoc pricing is a function of
+    # 0.8.0 is also what makes `tine price`, time-of-day rate cards and the
+    # unmetered local servers readable at all, which is most of what the cost
+    # panels say.
+    "opentine>=0.8.0,<0.9",
     "dearpygui>=2.0,<3",
 ]
 

@@ -30,6 +30,14 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _opentine_version() -> str:
+    """The installed opentine's version, or why it could not be read."""
+    try:
+        return version("opentine")
+    except PackageNotFoundError:  # pragma: no cover - a broken installation
+        return "not installed"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="tine-gui",
@@ -44,7 +52,13 @@ def main() -> None:
             "(default: last used directory, then ./.tine_runs)"
         ),
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--version",
+        action="version",
+        # The installed opentine decides what this console can read and which
+        # actions it offers, so a bug report is only useful with both versions.
+        version=f"%(prog)s {__version__} (opentine {_opentine_version()})",
+    )
     args = parser.parse_args()
 
     try:

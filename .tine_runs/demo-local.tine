@@ -1,0 +1,92 @@
+{
+  "cache": {},
+  "created_at": 1787584574.8417237,
+  "format_version": 2,
+  "graph": {
+    "order": [
+      "l1",
+      "l2",
+      "l3"
+    ],
+    "steps": {
+      "l1": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "l1",
+        "inputs": {
+          "text": "Summarise the on-call log locally."
+        },
+        "kind": "think",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "l2": {
+        "billing": {
+          "known_subtotal_usd": 0.0,
+          "status": "unmetered"
+        },
+        "cost": 0.0,
+        "duration": 8.4,
+        "error": {},
+        "id": "l2",
+        "inputs": {
+          "text": "Summarise 400 lines of log."
+        },
+        "kind": "model",
+        "model_info": "llama-3.3-70b",
+        "outputs": {
+          "text": "Three incidents, all disk pressure on node 4."
+        },
+        "parent_ids": [
+          "l1"
+        ],
+        "provider": "vllm",
+        "timestamp": 1787584594.8416927,
+        "tool_info": {},
+        "usage": {
+          "input": 12400,
+          "output": 320,
+          "total": 12720
+        }
+      },
+      "l3": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "l3",
+        "inputs": {
+          "text": "Disk pressure on node 4, three times."
+        },
+        "kind": "done",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [
+          "l2"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "96c060a57b1da11515e2237e09a474db1d95457f6dfff3167ddebcc6c8812e3f"
+    },
+    "model_info": "llama-3.3-70b",
+    "system_prompt": "",
+    "user_prompt": "What happened on call last night?"
+  },
+  "policies": {},
+  "refs": {
+    "main": "l3"
+  },
+  "run_id": "demo-local",
+  "status": "completed",
+  "transcript": []
+}

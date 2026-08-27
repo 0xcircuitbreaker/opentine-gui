@@ -1,0 +1,145 @@
+{
+  "cache": {},
+  "created_at": 1787583094.8415792,
+  "format_version": 2,
+  "graph": {
+    "order": [
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+      "c5"
+    ],
+    "steps": {
+      "c1": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "c1",
+        "inputs": {
+          "text": "Read the incident report."
+        },
+        "kind": "think",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "c2": {
+        "cost": 0.0,
+        "duration": 0.2,
+        "error": {},
+        "id": "c2",
+        "inputs": {
+          "arguments": {
+            "path": "postmortem.md"
+          },
+          "name": "read_file"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "content": "root cause: retry storm"
+        },
+        "parent_ids": [
+          "c1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "read_file"
+        }
+      },
+      "c3": {
+        "cost": 0.0,
+        "duration": 0.4,
+        "error": {},
+        "id": "c3",
+        "inputs": {
+          "arguments": {
+            "window": "24h"
+          },
+          "name": "metrics"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "p99_ms": 4100
+        },
+        "parent_ids": [
+          "c1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "metrics"
+        }
+      },
+      "c4": {
+        "billing": {
+          "known_subtotal_usd": 0.009,
+          "status": "complete"
+        },
+        "causal_ids": [
+          "c2"
+        ],
+        "cost": 0.009,
+        "duration": 1.4,
+        "error": {},
+        "id": "c4",
+        "inputs": {
+          "text": "Write the mitigation plan."
+        },
+        "kind": "model",
+        "model_info": "claude-opus-5",
+        "outputs": {
+          "text": "Cap retries at 3 with jittered backoff."
+        },
+        "parent_ids": [
+          "c3"
+        ],
+        "provider": "anthropic",
+        "timestamp": 0.0,
+        "tool_info": {},
+        "usage": {
+          "input": 3400,
+          "output": 260,
+          "total": 3660
+        }
+      },
+      "c5": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "c5",
+        "inputs": {
+          "text": "Mitigation plan ready."
+        },
+        "kind": "done",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [
+          "c4"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "498084bbe8c0c32b2429915f16c786476ffb6f088211c1defb6969381a078745"
+    },
+    "model_info": "claude-opus-5",
+    "system_prompt": "",
+    "user_prompt": "Why did the checkout service melt down, and what do we change?"
+  },
+  "policies": {},
+  "refs": {
+    "main": "c5"
+  },
+  "run_id": "demo-causal",
+  "status": "completed",
+  "transcript": []
+}

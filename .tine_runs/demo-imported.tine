@@ -1,0 +1,100 @@
+{
+  "cache": {},
+  "created_at": 1787583994.8416572,
+  "format_version": 2,
+  "graph": {
+    "order": [
+      "i1",
+      "i2",
+      "i3"
+    ],
+    "steps": {
+      "i1": {
+        "cost": 0.0,
+        "duration": 2.2,
+        "error": {},
+        "id": "i1",
+        "inputs": {
+          "text": "Draft the migration checklist."
+        },
+        "kind": "model",
+        "model_info": "claude-opus-5",
+        "outputs": {
+          "text": "1. freeze writes 2. dual-write 3. backfill 4. cut over"
+        },
+        "parent_ids": [],
+        "provider": "anthropic",
+        "timestamp": 1787583994.8416057,
+        "tool_info": {},
+        "usage": {
+          "input": 1000,
+          "output": 500,
+          "total": 1500
+        }
+      },
+      "i2": {
+        "cost": 0.0,
+        "duration": 1.1,
+        "error": {},
+        "id": "i2",
+        "inputs": {
+          "text": "Estimate the backfill window."
+        },
+        "kind": "model",
+        "model_info": "gpt-5.6",
+        "outputs": {
+          "text": "About 6 hours at current write volume."
+        },
+        "parent_ids": [
+          "i1"
+        ],
+        "provider": "openai",
+        "timestamp": 1787584014.8416271,
+        "tool_info": {},
+        "usage": {
+          "input": 800,
+          "output": 220,
+          "total": 1020
+        }
+      },
+      "i3": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "i3",
+        "inputs": {
+          "text": "Checklist and window agreed."
+        },
+        "kind": "done",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [
+          "i2"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "import": {
+      "format": "otel-json",
+      "source": "collector-export.json"
+    },
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "eeb5f95f5b883b70398dd49ae3c35d64e42de36e636fbd1494486c9941db31b0"
+    },
+    "model_info": "claude-opus-5",
+    "system_prompt": "",
+    "user_prompt": "Plan the datastore migration."
+  },
+  "policies": {},
+  "refs": {
+    "main": "i3"
+  },
+  "run_id": "demo-imported",
+  "status": "completed",
+  "transcript": []
+}

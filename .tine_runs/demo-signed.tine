@@ -1,0 +1,148 @@
+{
+  "cache": {},
+  "created_at": 1787581294.8796144,
+  "format_version": 2,
+  "graph": {
+    "order": [
+      "s1",
+      "s2",
+      "s3",
+      "s4"
+    ],
+    "steps": {
+      "s1": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "s1",
+        "inputs": {
+          "text": "Plan the search strategy for Tine benchmarks."
+        },
+        "kind": "think",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [],
+        "timestamp": 0.0,
+        "tool_info": {}
+      },
+      "s2": {
+        "cost": 0.0008,
+        "duration": 0.42,
+        "error": {},
+        "id": "s2",
+        "inputs": {
+          "arguments": {
+            "q": "tine benchmark 2026"
+          },
+          "name": "web_search"
+        },
+        "kind": "tool",
+        "model_info": "",
+        "outputs": {
+          "result": "3 results"
+        },
+        "parent_ids": [
+          "s1"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {
+          "name": "web_search"
+        }
+      },
+      "s3": {
+        "billing": {
+          "known_subtotal_usd": 0.012
+        },
+        "cost": 0.012,
+        "duration": 1.7,
+        "error": {},
+        "id": "s3",
+        "inputs": {
+          "text": "Summarize search results"
+        },
+        "kind": "model",
+        "model_info": "claude-sonnet-4-6",
+        "outputs": {
+          "text": "Tine shows 2.3x throughput vs baseline."
+        },
+        "parent_ids": [
+          "s2"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {},
+        "usage": {
+          "input": 1200,
+          "output": 180,
+          "total": 1380
+        }
+      },
+      "s4": {
+        "cost": 0.0,
+        "duration": 0.05,
+        "error": {},
+        "id": "s4",
+        "inputs": {
+          "text": "Tine is 2.3x faster."
+        },
+        "kind": "done",
+        "model_info": "",
+        "outputs": {},
+        "parent_ids": [
+          "s3"
+        ],
+        "timestamp": 0.0,
+        "tool_info": {}
+      }
+    }
+  },
+  "manifest": {},
+  "metadata": {
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "1bf8689bad6b17d04abf72ad560d602615b8906636463bd52356583aa44b2b47",
+      "signature": {
+        "alg": "hmac-sha256",
+        "key_id": "demo",
+        "scheme": "tine-sig/2",
+        "signer": "demo@opentine",
+        "value": "b062db33dd19aa164beb2209d0520744b40b9fe36ee3daedc292ab22fac958f4"
+      }
+    },
+    "model_info": "claude-sonnet-4-6",
+    "system_prompt": "You are a research assistant.",
+    "user_prompt": "How does Tine compare to the baseline benchmark?"
+  },
+  "policies": {},
+  "refs": {
+    "main": "s4"
+  },
+  "run_id": "demo-signed",
+  "status": "completed",
+  "transcript": [
+    {
+      "content": "How does Tine compare to the baseline benchmark?",
+      "role": "user"
+    },
+    {
+      "content": "I'll search for published benchmark numbers first.",
+      "role": "assistant",
+      "step_id": "s1"
+    },
+    {
+      "content": "3 results: throughput comparison, latency study, cost analysis",
+      "name": "web_search",
+      "role": "tool",
+      "step_id": "s2"
+    },
+    {
+      "content": "Tine shows 2.3x throughput vs baseline.",
+      "role": "assistant",
+      "step_id": "s3"
+    },
+    {
+      "content": "Tine is 2.3x faster.",
+      "role": "assistant",
+      "step_id": "s4"
+    }
+  ]
+}

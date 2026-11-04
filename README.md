@@ -56,6 +56,10 @@ tine-gui path/to/repo   # an opentine v3 repository, opened read-only
 | `Ctrl+C` | Copy the selected run id |
 | `Ctrl+R` | Force a reload of the runs directory |
 | `Ctrl+O` | Change the runs directory |
+| `Ctrl+T` | The selected run's transcript |
+| `Ctrl+D` | Compare the selected run with another |
+| `Ctrl+P` | Price the selected run |
+| `Ctrl+V` | Verify the selected file offline |
 | `F1` | Keyboard and feature help |
 
 On macOS the `Cmd` key works everywhere `Ctrl` does. Navigation keys stay out of the way while

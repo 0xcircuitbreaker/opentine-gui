@@ -96,3 +96,21 @@ def test_the_panel_runs_with_the_configured_key_and_copies_json(
     gui._copy_to_clipboard = lambda value, label: copied.append(value)
     gui._copy_verify_json()
     assert json.loads(copied[0])["ok"] is True
+
+
+def test_shortcuts_open_the_read_panels_and_respect_text_fields(
+    tmp_path: Path, gui_factory, fake_dpg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run().save(tmp_path / "abc.tine")
+    gui = gui_factory(tmp_path)
+    gui._select_run("abc")
+    opened: list[str] = []
+    for name in ("_open_transcript", "_open_diff_dialog", "_open_pricing", "_open_verify"):
+        monkeypatch.setattr(gui, name, lambda name=name: opened.append(name))
+    monkeypatch.setattr(gui, "_command_down", lambda: True)
+    monkeypatch.setattr(gui, "_typing", lambda: False)
+    gui._on_ctrl_t(), gui._on_ctrl_d(), gui._on_ctrl_p(), gui._on_ctrl_v()
+    assert opened == ["_open_transcript", "_open_diff_dialog", "_open_pricing", "_open_verify"]
+    monkeypatch.setattr(gui, "_typing", lambda: True)  # Ctrl+V pastes into a field
+    gui._on_ctrl_v()
+    assert opened[-1] == "_open_verify" and len(opened) == 4

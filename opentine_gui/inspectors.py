@@ -857,10 +857,10 @@ def _transcript_turns(run: Run) -> list[dict[str, str]]:
         reasoning = entry.get("reasoning_content")
         turns.append(
             {
-                "role": _oneline(entry.get("role") or "?"),
-                "name": _oneline(entry.get("name") or ""),
+                "role": _truncate(_oneline(entry.get("role") or "?"), 40),
+                "name": _truncate(_oneline(entry.get("name") or ""), 80),
                 "step_id": _oneline(entry.get("step_id") or ""),
-                "tool_call_id": _oneline(entry.get("tool_call_id") or ""),
+                "tool_call_id": _truncate(_oneline(entry.get("tool_call_id") or ""), 80),
                 "tool_calls": call_names,
                 "reasoning": _truncate(reasoning, 2000) if isinstance(reasoning, str) else "",
                 "content": content,

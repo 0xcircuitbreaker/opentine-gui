@@ -34,7 +34,7 @@ import dearpygui.dearpygui as dpg
 from opentine.core import Run, RunStatus, Step, StepKind
 
 from opentine_gui import __version__ as _GUI_VERSION
-from opentine_gui import otelio, pricing, stats, trust, verify
+from opentine_gui import exports, otelio, pricing, stats, trust, verify
 from opentine_gui.desktop import (
     EXTRA_GLYPH_RANGES,
     FONT_SIZE,
@@ -84,6 +84,7 @@ from opentine_gui.sources import (
     RunEntry,
     Snapshot,
     _export_path,
+    _export_path_with,
     _fields_a_save_would_drop,
     _forget_run,
     _safe_run_path,
@@ -93,6 +94,7 @@ from opentine_gui.sources import (
     _verify_integrity_cached,
     artifact_format,
     open_source,
+    repository_kind,
 )
 from opentine_gui.text import (
     _elide_middle,
@@ -719,22 +721,36 @@ class OpentineGUI:
                 )
                 dpg.add_separator()
                 dpg.add_menu_item(
-                    label="Transcript...", callback=self._open_transcript, tag="menu_transcript"
+                    label="Transcript...   Ctrl+T",
+                    callback=self._open_transcript,
+                    tag="menu_transcript",
                 )
                 dpg.add_menu_item(
-                    label="Price this run...", callback=self._open_pricing, tag="menu_pricing"
+                    label="Price this run...   Ctrl+P",
+                    callback=self._open_pricing,
+                    tag="menu_pricing",
                 )
                 dpg.add_menu_item(
-                    label="Verify offline...", callback=self._open_verify, tag="menu_verify"
+                    label="Verify offline...   Ctrl+V",
+                    callback=self._open_verify,
+                    tag="menu_verify",
                 )
                 dpg.add_menu_item(
-                    label="Compare with...", callback=self._open_diff_dialog, tag="menu_diff"
+                    label="Compare with...   Ctrl+D",
+                    callback=self._open_diff_dialog,
+                    tag="menu_diff",
                 )
                 dpg.add_separator()
                 dpg.add_menu_item(
                     label="Export as OpenTelemetry JSON",
                     callback=self._export_otel,
                     tag="menu_export_otel",
+                )
+                dpg.add_menu_item(
+                    label="Export as HTML page", callback=self._export_html, tag="menu_export_html"
+                )
+                dpg.add_menu_item(
+                    label="Export as ATIF JSON", callback=self._export_atif, tag="menu_export_atif"
                 )
             with dpg.menu(label="View"):
                 dpg.add_menu_item(
@@ -943,6 +959,10 @@ class OpentineGUI:
             dpg.add_key_press_handler(dpg.mvKey_C, callback=self._on_ctrl_c)
             dpg.add_key_press_handler(dpg.mvKey_R, callback=self._on_ctrl_r)
             dpg.add_key_press_handler(dpg.mvKey_O, callback=self._on_ctrl_o)
+            dpg.add_key_press_handler(dpg.mvKey_T, callback=self._on_ctrl_t)
+            dpg.add_key_press_handler(dpg.mvKey_D, callback=self._on_ctrl_d)
+            dpg.add_key_press_handler(dpg.mvKey_P, callback=self._on_ctrl_p)
+            dpg.add_key_press_handler(dpg.mvKey_V, callback=self._on_ctrl_v)
             dpg.add_key_press_handler(dpg.mvKey_F1, callback=self._on_help_key)
 
     def _bind_ui_font(self) -> bool:
@@ -988,6 +1008,9 @@ class OpentineGUI:
                 "fork_reason",
                 "import_path",
                 "text_body",
+                "pricing_date",
+                "verify_action_policy",
+                "verify_tsa_roots",
             )
         )
 
@@ -1128,6 +1151,23 @@ class OpentineGUI:
     def _on_ctrl_o(self) -> None:
         if self._command_down() and not self._typing() and not self._modal_open():
             self._open_dir_picker()
+
+    def _on_ctrl_t(self) -> None:
+        if self._command_down() and not self._typing() and not self._modal_open():
+            self._open_transcript()
+
+    def _on_ctrl_d(self) -> None:
+        if self._command_down() and not self._typing() and not self._modal_open():
+            self._open_diff_dialog()
+
+    def _on_ctrl_p(self) -> None:
+        if self._command_down() and not self._typing() and not self._modal_open():
+            self._open_pricing()
+
+    def _on_ctrl_v(self) -> None:
+        # Ctrl+V is paste inside a text field; _typing() leaves it to the field.
+        if self._command_down() and not self._typing() and not self._modal_open():
+            self._open_verify()
 
     def _on_help_key(self) -> None:
         if not self._typing():
@@ -1291,14 +1331,15 @@ class OpentineGUI:
             # The panel's own subtitle used to say what a run list is for. It
             # says what this one holds instead: the same row, carrying a fact.
             problems = len(self._errors)
-            kind = "v3 repository" if self._snapshot.kind == "repository" else ".tine directory"
+            repository = self._snapshot.kind == "repository"
+            kind = self._repository_kind() if repository else ".tine directory"
             note = f", {problems} problem(s)" if problems else ""
             dpg.set_value("panel_runs_subtitle", f"{len(self._entries)} in this {kind}{note}")
         if not dpg.does_item_exist("source_badge"):
             return
         if self._snapshot.kind == "repository":
             dpg.configure_item("source_badge", color=ACCENT_PURPLE)
-            dpg.set_value("source_badge", "v3 repository (read-only)")
+            dpg.set_value("source_badge", f"{self._repository_kind()} (read-only)")
         else:
             dpg.configure_item("source_badge", color=BRAND)
             dpg.set_value("source_badge", ".tine directory")
@@ -1564,8 +1605,10 @@ class OpentineGUI:
             ("btn_fork_wrap", can_fork),
             ("menu_transcript", run is not None),
             ("menu_pricing", run is not None),
-            ("menu_verify", bool(entry and entry.path) and verify.available()),
+            ("menu_verify", entry is not None and verify.available()),
             ("menu_export_otel", run is not None and otelio.export_available()),
+            ("menu_export_html", run is not None and exports.available(exports.HTML)),
+            ("menu_export_atif", run is not None and exports.available(exports.ATIF)),
             ("menu_import", self._snapshot.writable and otelio.import_available()),
             ("menu_refs", self._snapshot.kind == "repository"),
             ("menu_diff", can_diff),
@@ -1619,9 +1662,9 @@ class OpentineGUI:
     def _repo_trust_lines(self) -> list[str]:
         """A v3 run's trust story is the store's, not a file's."""
         return [
-            "Integrity: every object in a v3 repository is content-addressed and "
+            "Integrity: every object in a repository is content-addressed and "
             "verified on read",
-            "Signature: v3 attestations are not read by this console "
+            "Signature: repository attestations are not read by this console "
             "(use `tine fsck` / `tine attest`)",
         ]
 
@@ -1648,7 +1691,7 @@ class OpentineGUI:
             title = f"No runs in {_oneline(self._runs_dir)}."
             hint = (
                 "File > Change runs dir (Ctrl+O) points the console at a directory of .tine "
-                "files or an opentine v3 repository. `python demo/seed.py` writes a sample set."
+                "files or an opentine repository. `python demo/seed.py` writes a sample set."
             )
         dpg.set_value("dag_empty_title", title)
         dpg.set_value("dag_empty_hint", hint)
@@ -2108,7 +2151,7 @@ class OpentineGUI:
             no_resize=True,
         ):
             dpg.add_text(
-                "A directory of .tine files, or an opentine v3 repository.",
+                "A directory of .tine files, or an opentine repository.",
                 color=TEXT_MUTED,
                 wrap=_px(580),
             )
@@ -2260,7 +2303,7 @@ class OpentineGUI:
         if not self._snapshot.writable or entry.path is None:
             self._note(
                 "warn",
-                "This is a v3 repository: writing here would append an object and move a "
+                "This is an opentine repository: writing here would append an object and move a "
                 "branch. Use `tine repo-fork` / `tine repo-resume` instead.",
             )
             return None
@@ -2757,6 +2800,42 @@ class OpentineGUI:
             return
         self._write_export(run, out_path, overwrite=False)
 
+    def _export_html(self) -> None:
+        self._export_as(exports.HTML)
+
+    def _export_atif(self) -> None:
+        self._export_as(exports.ATIF)
+
+    def _export_as(self, fmt: exports.Export) -> None:
+        """Write the selected run as an HTML page or ATIF document, never over a file."""
+        entry = self._selected_entry()
+        if entry is None:
+            self._set_status("Select a run to export")
+            return
+        run = entry.run
+        try:
+            out_path = _export_path_with(self._export_dir(), str(run.id), fmt.suffix)
+        except ValueError as e:
+            self._note("error", f"Cannot export: {_oneline(str(e))}")
+            return
+
+        def write(overwrite: bool) -> None:
+            try:
+                written = exports.write(
+                    fmt, run, out_path, cost=_cost_text(run), overwrite=overwrite
+                )
+            except Exception as e:
+                self._note("error", f"Cannot export {fmt.label}: {_oneline(str(e))}")
+                return
+            self._note("ok", f"Exported {fmt.label}, {_format_bytes(written)} to {out_path.name}")
+
+        if out_path.exists():
+            self._ask(
+                f"{_oneline(out_path.name)} already exists. Overwrite it?", lambda: write(True)
+            )
+            return
+        write(False)
+
     def _export_dir(self) -> Path:
         """Where an export lands: beside the runs, or beside a repository.
 
@@ -2796,7 +2875,7 @@ class OpentineGUI:
         if not self._snapshot.writable:
             self._note(
                 "warn",
-                "Open a .tine directory to import into; a v3 repository is read-only here",
+                "Open a .tine directory to import into; a repository is read-only here",
             )
             return
         if not otelio.import_available():
@@ -2943,8 +3022,15 @@ class OpentineGUI:
 
     def _open_verify(self) -> None:
         entry = self._selected_entry()
-        if entry is None or entry.path is None:
-            self._set_status("Select a .tine run to verify (repository runs: tine verify)")
+        if entry is None:
+            self._set_status("Select a run to verify")
+            return
+        if entry.path is None:
+            self._note(
+                "warn",
+                "Verify offline works on .tine files. For a repository run, export it or use "
+                "`tine verify --offline` against the repository.",
+            )
             return
         self._clear_panel_controls()
         for key, label, hint in self._VERIFY_PREFS:
@@ -3062,7 +3148,7 @@ class OpentineGUI:
 
     def _open_refs(self) -> None:
         if self._snapshot.kind != "repository":
-            self._set_status("Refs are a v3 repository concept; this is a .tine directory")
+            self._set_status("Refs are a repository concept; this is a .tine directory")
             return
         self._clear_panel_controls()
         groups: dict[str, list[str]] = {}
@@ -3114,8 +3200,19 @@ class OpentineGUI:
                     f"  {command}+C           copy the selected run id",
                     f"  {command}+R           reload the source now",
                     f"  {command}+O           change the runs directory",
+                    f"  {command}+T           the selected run's transcript",
+                    f"  {command}+D           compare the selected run with another",
+                    f"  {command}+P           price the selected run",
+                    f"  {command}+V           verify the selected file offline",
                     "  F1               this help",
                     "  Esc              close a dialog, else clear the DAG filter, else the search",
+                    "",
+                    "Menus",
+                    "  File: refresh, change directory, import a trace (OTLP, JSONL,",
+                    "        framework logs).",
+                    "  Run: pause, resume, fork, transcript, price, verify offline, compare,",
+                    "       export as OpenTelemetry JSON, an HTML page or ATIF JSON.",
+                    "  View: statistics, repository refs, auto-refresh, message log.",
                     "",
                     "Search",
                     "  Plain words are a substring search across ids, prompts, tags, metadata,",
@@ -3134,8 +3231,9 @@ class OpentineGUI:
                     "",
                     "Sources",
                     "  A directory of .tine files can be paused, resumed and forked.",
-                    "  An opentine v3 repository opens read-only: writing into one would",
-                    "  append an object and move a branch, so those actions stay disabled.",
+                    "  An opentine repository (object format 3 or 4) opens read-only:",
+                    "  writing into one would append an object and move a branch, so",
+                    "  those actions stay disabled.",
                     "",
                     "Trust",
                     "  v2 integrity covers the artifact body, not its metadata; a v4 file's",
@@ -3150,6 +3248,9 @@ class OpentineGUI:
         )
         self._center("help_dialog", (720, 560))
 
+    def _repository_kind(self) -> str:
+        return repository_kind(getattr(self._source, "object_format", None))
+
     def _open_about(self) -> None:
         lines = [
             f"opentine-gui {_GUI_VERSION}",
@@ -3161,8 +3262,8 @@ class OpentineGUI:
             f"Source: {self._source.label}",
             f"Signing key: {self._trust.source or 'none configured'}",
             "",
-            "Reads opentine .tine artifacts (format v2, v1 auto-migrated) and",
-            "opentine v3 repositories, read-only.",
+            "Reads opentine .tine artifacts (format v4 and v2; v1 and 0.1 migrated on load)",
+            "and opentine repositories (object format 3 or 4), read-only.",
         ]
         self._show_panel("About", "opentine run console", "\n".join(lines))
 

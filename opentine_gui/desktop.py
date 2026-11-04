@@ -15,6 +15,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+#: Largest preferences file read at startup.
+MAX_PREFERENCES_BYTES = 1024 * 1024
+
 PREFERENCES_ENV = "OPENTINE_GUI_PREFS"
 PREFERENCES_FILE = "preferences.json"
 UI_SCALE_ENV = "OPENTINE_GUI_SCALE"
@@ -316,6 +319,10 @@ def _load_preferences(path: Path | None = None) -> dict[str, str]:
         candidates = [_preferences_path(), _legacy_preferences_path()]
     for candidate in candidates:
         try:
+            # A preferences file is a few hundred bytes of strings; anything far
+            # larger is not ours, and is not read into memory on every launch.
+            if candidate.stat().st_size > MAX_PREFERENCES_BYTES:
+                continue
             raw = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, ValueError, RuntimeError):
             continue

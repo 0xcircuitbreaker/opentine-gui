@@ -212,23 +212,99 @@ _KNOWN_STEP_FIELDS = frozenset(getattr(Run, "__dataclass_fields__", {})) | froze
 )
 
 
-def _fields_a_save_would_drop(path: Path) -> tuple[str, ...]:
-    """Step keys in this file that the installed opentine cannot read back.
+#: The `kind` a format v4 artifact names (opentine 0.26+). Detected by version
+#: *and* kind together, as opentine's own reader does.
+V4_KIND = "tine-artifact/4"
 
-    opentine adds fields to a step within format v2 — `causal_ids`, then
-    `provider` — and its reader ignores keys it does not know. So an older
+try:  # private, but it is the exact reader Run.load uses: TINEZ1 + strict JSON
+    from opentine._artifact_io import read_artifact_json as _opentine_read_json
+except Exception:  # pragma: no cover - only reachable against a foreign opentine
+    _opentine_read_json = None
+
+
+def is_v4_document(data: Any) -> bool:
+    """Whether a parsed artifact is a format v4 bundle (`tine-artifact/4`)."""
+    return (
+        isinstance(data, dict)
+        and type(data.get("format_version")) is int
+        and data.get("format_version") == 4
+        and data.get("kind") == V4_KIND
+    )
+
+
+def read_artifact_document(path: Path) -> Any:
+    """One `.tine` file parsed the way opentine parses it, or None.
+
+    Since opentine 0.11 an artifact may be TINEZ1-compressed, and since 0.26 the
+    default writer produces compressed format v4 bundles, so `json.loads` on the
+    raw bytes no longer reads most files. opentine's own reader unwraps the
+    codec under its size bound and refuses duplicate keys, NaN and lone
+    surrogates — the parser differentials a second, laxer parser here would
+    reintroduce. Anything unreadable is None: the caller is an advisory check.
+    """
+    try:
+        info = path.stat()
+        if info.st_size > MAX_TINE_BYTES:
+            return None
+        if _opentine_read_json is not None:
+            return _opentine_read_json(path)
+        return json.loads(path.read_bytes())
+    except Exception:
+        return None
+
+
+def _v4_fields_a_save_would_drop(data: dict[str, Any]) -> tuple[str, ...]:
+    """What re-writing a v4 bundle through this opentine would not reproduce.
+
+    v4 is content-addressed: if the installed reader and writer round-trip the
+    run, the rewrite names the same root and the same annotation chain, and
+    nothing can have been lost. When they differ, the payload keys that went
+    missing are named; when no key is missing but the content still changed,
+    the change is reported as a whole rather than guessed at.
+    """
+    from opentine._artifact_v4 import write_v4
+    from opentine._artifact_v4_read import read_v4_data
+
+    rewritten = json.loads(write_v4(read_v4_data(data)))
+    if rewritten.get("root") == data.get("root") and rewritten.get("annotations") == data.get(
+        "annotations"
+    ):
+        return ()
+
+    def body_keys(document: dict[str, Any], kinds: tuple[str, ...]) -> set[str]:
+        keys: set[str] = set()
+        for oid, entry in (document.get("objects") or {}).items():
+            body = entry.get("body") if isinstance(entry, dict) else None
+            if isinstance(oid, str) and oid.split(":", 1)[0] in kinds and isinstance(body, dict):
+                keys |= set(body)
+        return keys
+
+    missing = (body_keys(data, ("run",)) - body_keys(rewritten, ("run",))) | (
+        body_keys(data, ("event",)) - body_keys(rewritten, ("event",))
+    )
+    return tuple(sorted(missing)) or ("content this opentine re-derives differently",)
+
+
+def _fields_a_save_would_drop(path: Path) -> tuple[str, ...]:
+    """Fields in this file that the installed opentine cannot read back.
+
+    opentine adds fields to a step within a format — `causal_ids`, then
+    `provider` — and its v2 reader ignores keys it does not know. So an older
     library loads a newer artifact happily, drops the field in memory, and
     *destroys it on disk* the moment this console saves the run: pause, resume
     or fork. That is the failure this console exists to prevent, so the write
-    actions ask first, naming what would go.
+    actions ask first, naming what would go. A v4 bundle is checked by
+    round-tripping it, since its envelopes are not run dicts.
 
     Cheap enough to run per write (writes are rare) and fail-open: an artifact
     this cannot parse is one the write path will fail on anyway.
     """
     try:
-        if path.stat().st_size > MAX_TINE_BYTES:
+        data = read_artifact_document(path)
+        if not isinstance(data, dict):
             return ()
-        data = json.loads(path.read_text(encoding="utf-8"))
+        if is_v4_document(data):
+            return _v4_fields_a_save_would_drop(data)
         unknown = set(data) - _KNOWN_RUN_FIELDS
         steps = data["graph"]["steps"]
         records = steps.values() if isinstance(steps, dict) else steps
@@ -238,6 +314,21 @@ def _fields_a_save_would_drop(path: Path) -> tuple[str, ...]:
         return tuple(sorted(unknown))
     except Exception:
         return ()
+
+
+def artifact_format(path: Path | None) -> int | None:
+    """The on-disk format of one artifact (1, 2 or 4), or None if unreadable.
+
+    `Run.format_version` cannot answer this: opentine's v4 reader hands back a
+    run that reports the v2 record version it was rebuilt as.
+    """
+    if path is None:
+        return None
+    data = read_artifact_document(path)
+    if is_v4_document(data):
+        return 4
+    version = data.get("format_version") if isinstance(data, dict) else None
+    return version if type(version) is int else None
 
 
 def _is_v3_repository(path: Path) -> bool:

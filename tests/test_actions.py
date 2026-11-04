@@ -27,6 +27,7 @@ from opentine.repo import Repo
 from opentine_gui import app, otelio
 from opentine_gui.app import OpentineGUI
 from opentine_gui.sources import _export_path
+from tests.artifacts import dump_doc, load_doc, save_v2
 
 #: opentine refuses an HMAC key shorter than 16 bytes, so this is the shortest
 #: key that can produce a signed artifact at all.
@@ -244,12 +245,12 @@ def test_resuming_a_signed_artifact_asks_before_dropping_the_signature(
     # edit below also breaks the digest, which the console lists as a load
     # problem; what the question is about is the signature.
     path = tmp_path / "abc.tine"
-    _make_run("abc", RunStatus.completed).save(
-        path, sign_key=SIGNING_KEY, key_id="k", signer="s"
+    save_v2(
+        _make_run("abc", RunStatus.completed), path, sign_key=SIGNING_KEY, key_id="k", signer="s"
     )
-    artifact = json.loads(path.read_text(encoding="utf-8"))
+    artifact = load_doc(path)
     artifact["status"] = "paused"
-    path.write_text(json.dumps(artifact), encoding="utf-8")
+    dump_doc(path, artifact)
     before = path.read_bytes()
 
     gui = _console(gui_factory, tmp_path)

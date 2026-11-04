@@ -1,10 +1,12 @@
 """Seed ./.tine_runs with demo runs covering every status, kind, and DAG shape.
 
-Runs are built with the real opentine API and written in the current portable
-``.tine`` format of the installed opentine (``format_version == 2`` as of
-opentine 0.3.0, integrity digest included), so the GUI loads them exactly like
-runs produced by live agents. Legacy v1 files are auto-migrated by Run.load;
-a committed v1 sample lives in tests/fixtures/legacy_v1.tine.
+Runs are built with the real opentine API and written in the default format of
+the installed opentine (a compressed ``tine-artifact/4`` bundle since opentine
+0.26), so the GUI loads them exactly like runs produced by live agents. One run,
+``demo-legacy-v2``, is written in the deprecated v2 format on purpose, so the
+console's "this save converts it to v4" question has something to ask about.
+Legacy v1 files are auto-migrated by Run.load; a committed v1 sample lives in
+tests/fixtures/legacy_v1.tine.
 
 Run: `uv run python demo/seed.py`
 """
@@ -379,6 +381,47 @@ def peak_window() -> Run:
 DEMO_HMAC_KEY = b"opentine-gui-demo-signing-key-0001"
 
 
+def edited_fork_capture() -> Run:
+    """A transcript-imported run that was then forked with an edited step.
+
+    Shows the metadata newer opentine recorders add: how the run was captured
+    (and that the agent could have edited that log), the agent identity it
+    claims, and an edit record (opentine 0.28) for a step that never ran.
+    """
+    steps = [
+        _step("e1", [], StepKind.model, {"text": "Summarise the incident."},
+              {"text": "Disk filled on db-2 at 03:12."}, model="claude-opus-5",
+              provider="anthropic", usage={"input": 600, "output": 80, "total": 680},
+              ts=time.time() - 600),
+        _step("e2", ["e1"], StepKind.tool, {"cmd": "df -h /var/lib/postgres"},
+              {"stdout": "100% used"}, tool_info={"name": "bash"}, ts=time.time() - 590),
+        _step("e3", ["e2"], StepKind.model, {"text": "Propose a fix, but keep data."},
+              {"text": "Rotate WAL, then grow the volume."}, model="claude-opus-5",
+              provider="anthropic", ts=time.time() - 580),
+    ]
+    return _run(
+        "demo-edited-fork", steps,
+        status=RunStatus.completed,
+        model_info="claude-opus-5",
+        user_prompt="Triage the db-2 incident.",
+        created_at=time.time() - 600,
+        metadata={
+            "capture": {
+                "method": "transcript-import",
+                "source_format": "claude-code",
+                "agent_writable": True,
+            },
+            "agent_identity": {"harness": "claude-code", "model": "claude-opus-5"},
+            "edit": {
+                "step": "e3-original",
+                "edited_step": "e3",
+                "changes": [{"path": "inputs.text", "op": "set"}],
+                "executed": False,
+            },
+        },
+    )
+
+
 def seed_repository(root: Path) -> Path:
     """A small v3 repository, so the read-only repository mode has something to show."""
     from opentine.repo import Repo
@@ -414,6 +457,7 @@ def main(runs_dir: Path | str = Path(".tine_runs")) -> None:
         imported_unpriced(),
         unmetered_local(),
         peak_window(),
+        edited_fork_capture(),
     ]:
         path = runs_dir / f"{run.id}.tine"
         run.save(path)
@@ -426,6 +470,15 @@ def main(runs_dir: Path | str = Path(".tine_runs")) -> None:
     signed_path = runs_dir / "demo-signed.tine"
     signed.save(signed_path, sign_key=DEMO_HMAC_KEY, key_id="demo", signer="demo@opentine")
     print(f"  wrote {signed_path}  [signed with the demo key]")
+
+    # One file in the deprecated v2 format, as every opentine before 0.26 wrote.
+    from opentine._format_v4 import write_format
+
+    legacy = paused_midflight()
+    legacy.run_id = "demo-legacy-v2"
+    with write_format(2):
+        legacy.save(runs_dir / "demo-legacy-v2.tine")
+    print(f"  wrote {runs_dir / 'demo-legacy-v2.tine'}  [format v2, converted on any save]")
 
     # Also drop a corrupt file to exercise the load-error path.
     (runs_dir / "zz-corrupt.tine").write_bytes(b"{ not valid json")

@@ -122,7 +122,9 @@ def test_a_run_survives_the_round_trip_through_a_written_document(tmp_path: Path
     assert imported.events == 3
     assert [step.kind.value for step in steps] == ["model", "tool", "error"]
     assert [step.model_info for step in steps] == ["claude-sonnet-4", "", ""]
-    assert steps[0].cost == pytest.approx(0.0125)
+    # opentine 0.10+: an imported trace never sets its own cost. The figure the
+    # file claims is not trusted; a price comes from the catalog or not at all.
+    assert steps[0].cost == 0.0
     assert steps[0].usage == {"input": 40, "output": 12}
     assert steps[0].inputs == {"prompt": "plan the release"}
     assert steps[0].duration == pytest.approx(1.5)
@@ -151,7 +153,10 @@ def test_write_export_refuses_an_existing_file_until_told_otherwise(tmp_path: Pa
     second = otelio.write_export(_run("other-run"), target, overwrite=True)
     assert second.path == first.path
     assert target.read_bytes() != before
-    assert _spans(json.loads(target.read_text()))[0]["traceId"] == "other-run"
+    # OTLP requires a 32-hex trace id, so opentine derives one from the run id.
+    trace_id = _spans(json.loads(target.read_text()))[0]["traceId"]
+    first_id = _spans(json.loads(before))[0]["traceId"]
+    assert len(trace_id) == 32 and trace_id != first_id
 
 
 def test_a_successful_export_leaves_only_the_document(tmp_path: Path) -> None:

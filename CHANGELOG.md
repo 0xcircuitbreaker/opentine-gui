@@ -22,10 +22,13 @@ silently fell back to "unknown".
   upgraded run's `upgraded_from` record as a claim.
 - **Saves say when they convert a file.** Pause, resume and fork re-save through opentine, which
   writes v4. When the file on disk is v1/v2, the confirmation now says the save converts it and
-  that opentine before 0.26 cannot open the result.
+  that opentine before 0.26 cannot open the result, including opentine 0.1's
+  linear files, which carry no `format_version`.
 - **Save-safety for v4.** "Would this save drop something?" is answered for v4 bundles by
   round-tripping them through the installed reader and writer and comparing roots, instead of
-  diffing keys of a run dict a v4 file does not have.
+  diffing keys of a run dict a v4 file does not have. The full re-encode only runs when a payload holds a key the
+  installed writer does not produce, and verdicts are cached per file revision, so a large run
+  no longer stalls the UI for seconds before the dialog appears.
 - **Newer recorder metadata is shown, labelled as claims:** capture method and source format
   (with a warning when the agent could have edited the log it was imported from), the claimed
   agent identity, edited forks (opentine 0.28/0.33) with the changed paths and a note that the
@@ -46,6 +49,10 @@ silently fell back to "unknown".
   text" / "Copy panel" cannot carry them to the clipboard.
 - Exception text in the pricing and statistics panels is flattened, so it cannot open a row.
 - Size and age formatting tolerate NaN, infinite and out-of-range values.
+- **The 10 MiB file limit now bounds what is parsed, not just what is on disk.** A TINEZ1 file
+  declares its inflated size, and a 3 MB file could expand to 150 MB and be parsed several times
+  per selection. Such files are skipped unread ("expands to N bytes"), and every read the console
+  makes itself inflates under the same bound.
 
 ### Changed
 

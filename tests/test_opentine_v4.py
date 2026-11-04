@@ -241,3 +241,53 @@ def test_pausing_a_v4_file_asks_nothing(tmp_path: Path, gui_factory) -> None:
     gui._pause_selected()
     assert gui._modal_open() is None
     assert Run.load(path).status == RunStatus.paused
+
+
+# ---- review findings ------------------------------------------------------
+
+
+def test_a_small_file_that_expands_past_the_limit_is_skipped_unparsed(tmp_path: Path) -> None:
+    import zlib
+
+    from opentine._codec import MAGIC, ZLIB, _uvarint
+
+    from opentine_gui import sources
+
+    # A well-formed frame opentine itself would inflate: honest length, < 1000:1.
+    raw = json.dumps({"pad": "x" * (sources.MAX_TINE_BYTES + 1024)}).encode()
+    bomb = MAGIC + bytes([ZLIB]) + _uvarint(len(raw)) + zlib.compress(raw, 9)
+    assert len(bomb) < sources.MAX_TINE_BYTES
+    path = tmp_path / "bomb.tine"
+    path.write_bytes(bomb)
+    assert sources.inflated_size(path, len(bomb)) == len(raw)
+    assert read_artifact_document(path) is None
+    runs, errors, _, _ = sources.load_runs(tmp_path)
+    assert runs == [] and any("expands to" in e for e in errors)
+
+
+def test_the_save_check_is_cached_and_skips_the_rewrite_for_known_keys(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import opentine._artifact_v4 as v4
+
+    path = tmp_path / "abc.tine"
+    _run().save(path)
+    calls: list[int] = []
+    real = v4.write_v4
+    monkeypatch.setattr(v4, "write_v4", lambda run: calls.append(1) or real(run))
+    assert _fields_a_save_would_drop(path) == ()
+    assert _fields_a_save_would_drop(path) == ()
+    assert calls == [], "a file holding only known keys needs no re-encode"
+
+
+def test_a_legacy_linear_file_is_named_in_the_conversion_warning(
+    tmp_path: Path, gui_factory, fake_dpg
+) -> None:
+    from opentine_gui.app import OpentineGUI
+
+    path = tmp_path / "old.tine"
+    path.write_text(json.dumps({"type": "Run", "run_id": "old", "steps": []}), encoding="utf-8")
+    assert artifact_format(path) == 0
+    gui = gui_factory(tmp_path)
+    question = OpentineGUI._signature_at_risk(gui, path)
+    assert "from the legacy 0.1 format to v4" in question

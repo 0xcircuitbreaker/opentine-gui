@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -216,10 +217,39 @@ _KNOWN_STEP_FIELDS = frozenset(getattr(Run, "__dataclass_fields__", {})) | froze
 #: *and* kind together, as opentine's own reader does.
 V4_KIND = "tine-artifact/4"
 
-try:  # private, but it is the exact reader Run.load uses: TINEZ1 + strict JSON
-    from opentine._artifact_io import read_artifact_json as _opentine_read_json
+try:  # private, but they are the exact codec and parser Run.load uses
+    from opentine._artifact_io import parse_artifact_json as _opentine_parse_json
+    from opentine._codec import declared_size as _declared_size
+    from opentine._codec import unwrap as _unwrap
 except Exception:  # pragma: no cover - only reachable against a foreign opentine
-    _opentine_read_json = None
+    _opentine_parse_json = None
+    _declared_size = None
+    _unwrap = None
+
+#: Bytes of a file's head that hold the TINEZ1 magic, codec byte and declared
+#: length (a uvarint of at most 10 bytes).
+_HEADER_BYTES = 32
+
+
+def inflated_size(path: Path, on_disk: int) -> int:
+    """How many bytes a `.tine` file parses as, without inflating it.
+
+    MAX_TINE_BYTES was written when the bytes on disk *were* the bytes parsed.
+    A TINEZ1 file declares its inflated length up front and opentine holds the
+    codec to it (and to a 1000:1 ratio), so a 3 MB file can legitimately parse
+    as 150 MB. The declaration is binding, so reading it is enough to refuse.
+    """
+    if _declared_size is None:
+        return on_disk
+    try:
+        # Never open a FIFO or device to read a header: that blocks the scan.
+        if not stat.S_ISREG(path.stat(follow_symlinks=True).st_mode):
+            return on_disk
+        with path.open("rb") as handle:
+            head = handle.read(_HEADER_BYTES)
+        return max(on_disk, int(_declared_size(head)))
+    except Exception:
+        return on_disk
 
 
 def is_v4_document(data: Any) -> bool:
@@ -244,11 +274,16 @@ def read_artifact_document(path: Path) -> Any:
     """
     try:
         info = path.stat()
-        if info.st_size > MAX_TINE_BYTES:
+        if info.st_size > MAX_TINE_BYTES or not stat.S_ISREG(info.st_mode):
             return None
-        if _opentine_read_json is not None:
-            return _opentine_read_json(path)
-        return json.loads(path.read_bytes())
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_TINE_BYTES + 1)
+        if len(raw) > MAX_TINE_BYTES:
+            return None
+        if _unwrap is None or _opentine_parse_json is None:
+            return json.loads(raw)
+        # The inflated size is bounded by the same limit as the on-disk size.
+        return _opentine_parse_json(_unwrap(raw, limit=MAX_TINE_BYTES))
     except Exception:
         return None
 
@@ -262,6 +297,12 @@ def _v4_fields_a_save_would_drop(data: dict[str, Any]) -> tuple[str, ...]:
     missing are named; when no key is missing but the content still changed,
     the change is reported as a whole rather than guessed at.
     """
+    if not _v4_keys_beyond_known(data):
+        # Every payload key is one this opentine's own writer produces, so the
+        # reader holds all of them: nothing a save could drop. This is the
+        # common case, and it costs a key walk rather than a full re-encode
+        # (about 10 s for a 3000-step run, on the UI thread).
+        return ()
     from opentine._artifact_v4 import write_v4
     from opentine._artifact_v4_read import read_v4_data
 
@@ -285,7 +326,79 @@ def _v4_fields_a_save_would_drop(data: dict[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(missing)) or ("content this opentine re-derives differently",)
 
 
+#: Run and event payload keys the installed opentine writes. A v4 payload
+#: holding only these round-trips; one holding anything else came from a newer
+#: writer and is checked by actually re-encoding it.
+_V4_KNOWN_KEYS: dict[str, frozenset[str]] | None = None
+
+#: Optional payload keys the sample run below does not exercise.
+_V4_OPTIONAL_KEYS = frozenset({"upgraded_from", "fork_overrides", "fork_base", "source_run_id"})
+
+
+def _v4_known_keys() -> dict[str, frozenset[str]]:
+    global _V4_KNOWN_KEYS
+    if _V4_KNOWN_KEYS is None:
+        known: dict[str, set[str]] = {"run": set(_V4_OPTIONAL_KEYS), "event": set()}
+        try:
+            from opentine._artifact_v4 import write_v4
+            from opentine.core import Graph, RunStatus, Step, StepKind
+
+            graph = Graph()
+            graph.add(
+                Step(
+                    id="a", parent_ids=[], kind=StepKind.model, inputs={"t": "x"},
+                    outputs={"t": "y"}, model_info="m", tool_info={"n": 1}, error={"e": 1},
+                    timestamp=1.0, duration=1.0, cost=0.1, usage={"input": 1},
+                    billing={"status": "complete"}, provider="p",
+                )
+            )
+            graph.add(Step(id="b", parent_ids=["a"], kind=StepKind.done, inputs={},
+                           causal_ids=["a"]))
+            sample = Run(id="sample", graph=graph, status=RunStatus.completed,
+                         model_info="m", system_prompt="s", user_prompt="u", tags=["t"])
+            sample.refs = {"r": "b"}
+            sample.transcript = [{"role": "user", "content": "u", "step_id": "a"}]
+            document = json.loads(write_v4(sample))
+            for oid, entry in document["objects"].items():
+                kind = oid.split(":", 1)[0]
+                if kind in known and isinstance(entry.get("body"), dict):
+                    known[kind] |= set(entry["body"])
+        except Exception:
+            # No sample means no fast path: every check takes the full round trip.
+            known = {"run": set(), "event": set()}
+        _V4_KNOWN_KEYS = {kind: frozenset(keys) for kind, keys in known.items()}
+    return _V4_KNOWN_KEYS
+
+
+def _v4_keys_beyond_known(data: dict[str, Any]) -> bool:
+    known = _v4_known_keys()
+    if not known["run"] or not known["event"]:
+        return True
+    for oid, entry in (data.get("objects") or {}).items():
+        kind = oid.split(":", 1)[0] if isinstance(oid, str) else ""
+        body = entry.get("body") if isinstance(entry, dict) else None
+        if kind in known and isinstance(body, dict) and not set(body) <= known[kind]:
+            return True
+    return False
+
+
+_DROP_CACHE: dict[tuple, Any] = {}
+_DROP_CACHE_MAX = 256
+
+
 def _fields_a_save_would_drop(path: Path) -> tuple[str, ...]:
+    """Cached per file revision: see `_uncached_fields_a_save_would_drop`."""
+    try:
+        key = _cache_key(path, path.stat(), "drop")
+    except OSError:
+        return ()
+    hit = _DROP_CACHE.get(key)
+    if hit is not None:
+        return hit
+    return _remember(_DROP_CACHE, key, _uncached_fields_a_save_would_drop(path), _DROP_CACHE_MAX)
+
+
+def _uncached_fields_a_save_would_drop(path: Path) -> tuple[str, ...]:
     """Fields in this file that the installed opentine cannot read back.
 
     opentine adds fields to a step within a format — `causal_ids`, then
@@ -327,8 +440,17 @@ def artifact_format(path: Path | None) -> int | None:
     data = read_artifact_document(path)
     if is_v4_document(data):
         return 4
-    version = data.get("format_version") if isinstance(data, dict) else None
-    return version if type(version) is int else None
+    if not isinstance(data, dict):
+        return None
+    version = data.get("format_version")
+    if type(version) is int:
+        return version
+    try:  # opentine 0.1.0's linear record carries no format_version at all
+        from opentine.migrations import LEGACY_VERSION, is_legacy_linear
+
+        return LEGACY_VERSION if is_legacy_linear(data) else None
+    except Exception:
+        return None
 
 
 def _is_v3_repository(path: Path) -> bool:
@@ -388,6 +510,7 @@ def reset_caches() -> None:
     """
     _RUN_CACHE.clear()
     _VERIFY_CACHE.clear()
+    _DROP_CACHE.clear()
     _REPO_RUN_CACHE.clear()
 
 
@@ -497,6 +620,12 @@ def load_runs(
     for f, st in files:
         if st.st_size > MAX_TINE_BYTES:
             errors.append(f"{f.name}: skipped ({st.st_size} bytes > {MAX_TINE_BYTES})")
+            continue
+        inflated = inflated_size(f, st.st_size)
+        if inflated > MAX_TINE_BYTES:
+            errors.append(
+                f"{f.name}: skipped (expands to {inflated} bytes > {MAX_TINE_BYTES})"
+            )
             continue
         try:
             run = _load_run_cached(f, st)

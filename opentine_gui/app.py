@@ -21,6 +21,7 @@ be mistaken for one.
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import sys
@@ -33,7 +34,7 @@ import dearpygui.dearpygui as dpg
 from opentine.core import Run, RunStatus, Step, StepKind
 
 from opentine_gui import __version__ as _GUI_VERSION
-from opentine_gui import otelio, pricing, stats, trust
+from opentine_gui import otelio, pricing, stats, trust, verify
 from opentine_gui.desktop import (
     EXTRA_GLYPH_RANGES,
     FONT_SIZE,
@@ -87,6 +88,7 @@ from opentine_gui.sources import (
     _forget_run,
     _safe_run_path,
     _short_oid,
+    _signature_verdict,
     _verify_cached,
     _verify_integrity_cached,
     artifact_format,
@@ -721,6 +723,9 @@ class OpentineGUI:
                 )
                 dpg.add_menu_item(
                     label="Price this run...", callback=self._open_pricing, tag="menu_pricing"
+                )
+                dpg.add_menu_item(
+                    label="Verify offline...", callback=self._open_verify, tag="menu_verify"
                 )
                 dpg.add_menu_item(
                     label="Compare with...", callback=self._open_diff_dialog, tag="menu_diff"
@@ -1559,6 +1564,7 @@ class OpentineGUI:
             ("btn_fork_wrap", can_fork),
             ("menu_transcript", run is not None),
             ("menu_pricing", run is not None),
+            ("menu_verify", bool(entry and entry.path) and verify.available()),
             ("menu_export_otel", run is not None and otelio.export_available()),
             ("menu_import", self._snapshot.writable and otelio.import_available()),
             ("menu_refs", self._snapshot.kind == "repository"),
@@ -2927,6 +2933,94 @@ class OpentineGUI:
         )
         self._show_run_detail(entry)
 
+    # ----------------------------------------------------------- verification
+
+    #: Preference keys for the optional offline-verify inputs. Paths only.
+    _VERIFY_PREFS = (
+        ("verify_action_policy", "Action policy", "policy.json"),
+        ("verify_tsa_roots", "TSA roots", "roots.pem"),
+    )
+
+    def _open_verify(self) -> None:
+        entry = self._selected_entry()
+        if entry is None or entry.path is None:
+            self._set_status("Select a .tine run to verify (repository runs: tine verify)")
+            return
+        self._clear_panel_controls()
+        for key, label, hint in self._VERIFY_PREFS:
+            dpg.add_text(label, parent="panel_controls", color=TEXT_MUTED)
+            dpg.add_input_text(
+                tag=key,
+                parent="panel_controls",
+                width=_px(150),
+                hint=hint,
+                default_value=str(self._preferences.get(key, "") or ""),
+            )
+        dpg.add_checkbox(
+            label="Strict",
+            tag="verify_strict",
+            parent="panel_controls",
+            default_value=bool(self._preferences.get("verify_strict", "") == "1"),
+        )
+        dpg.add_button(
+            label="Verify", parent="panel_controls", width=_px(80), callback=self._run_verify
+        )
+        dpg.add_button(
+            label="Copy JSON",
+            parent="panel_controls",
+            width=_px(100),
+            callback=self._copy_verify_json,
+        )
+        self._run_verify()
+
+    def _run_verify(self) -> None:
+        entry = self._selected_entry()
+        if entry is None or entry.path is None:
+            return
+        values = {
+            key: str(dpg.get_value(key) or "").strip() if dpg.does_item_exist(key) else ""
+            for key, _, _ in self._VERIFY_PREFS
+        }
+        strict = dpg.does_item_exist("verify_strict") and bool(dpg.get_value("verify_strict"))
+        for key, value in values.items():
+            self._preferences[key] = value
+        self._preferences["verify_strict"] = "1" if strict else ""
+        self._touch_preferences()
+        signature = None
+        if getattr(self._trust, "configured", False):
+            try:
+                signature = _signature_verdict(
+                    entry.path,
+                    entry.path.stat(),
+                    trust.verifier(self._trust),
+                    self._trust.fingerprint,
+                )
+            except OSError:
+                signature = None
+        report = verify.verify_offline(
+            entry.path,
+            signature=signature,
+            key_source=self._trust.source,
+            options=verify.VerifyOptions(
+                action_policy=values["verify_action_policy"],
+                tsa_roots=values["verify_tsa_roots"],
+                strict=strict,
+            ),
+        )
+        self._verify_document = report.document
+        subject = f"{_oneline(entry.run.id)} - {_oneline(entry.path.name)}"
+        if report.error:
+            self._show_panel("Verify offline", subject, f"Could not verify: {report.error}")
+            return
+        self._show_panel("Verify offline", subject, "\n".join(report.lines))
+
+    def _copy_verify_json(self) -> None:
+        document = getattr(self, "_verify_document", None)
+        if not document:
+            self._set_status("Nothing verified yet")
+            return
+        self._copy_to_clipboard(json.dumps(document, indent=2, sort_keys=True), "report JSON")
+
     # ------------------------------------------------------------------ views
 
     def _open_stats(self) -> None:
@@ -3044,8 +3138,11 @@ class OpentineGUI:
                     "  append an object and move a branch, so those actions stay disabled.",
                     "",
                     "Trust",
-                    "  Integrity covers the artifact body, not its metadata.",
+                    "  v2 integrity covers the artifact body, not its metadata; a v4 file's",
+                    "  covers every object, tags and metadata included. Neither is keyed.",
                     "  A signature covers what its scheme says it covers; the panel names it.",
+                    "  Run > Verify offline runs opentine's full offline report (digest,",
+                    "  signature, provenance, attestation, actions, timestamps) on the file.",
                     f"  Set {trust.HMAC_KEY_ENV} or {trust.PUBLIC_KEY_ENV} to verify"
                     " signatures here.",
                 ]

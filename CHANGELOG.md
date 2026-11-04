@@ -2,6 +2,17 @@
 
 All notable changes to opentine-gui are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Verify offline** (`Run > Verify offline...`): opentine's own `tine verify --offline` report
+  for the selected file - digest, signature, upgrade provenance, in-toto attestation, action
+  manifest and optional action policy, RFC 3161 timestamps with optional TSA roots, and a
+  `--strict` toggle. Built by opentine's report builder, so the console and the CLI cannot
+  disagree. The signature row is the console's own verdict under its configured key rather than
+  a second key loader; "Copy JSON" copies the `tine-verify-report/1` document.
+
 ## [0.4.0] - 2026-11-04
 
 Targets **opentine 0.34.0**, twenty-six releases on from 0.8.0. The release that matters is

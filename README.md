@@ -103,6 +103,11 @@ Noto Sans Mono CJK.
 
 - Compare any two runs — common ancestor, steps only on each side, per-field before/after
   deltas, plus the fields opentine's own diff does not compare (`provider`, `causal_ids`)
+- **Verify offline** (`Run > Verify offline...`) runs opentine's own `tine verify --offline`
+  report on the selected file: digest, signature, upgrade provenance, attestation, action
+  manifest and an optional action policy, and RFC 3161 timestamps against optional TSA roots.
+  The signature row uses the key configured for the console, and the report can be copied as
+  `tine-verify-report/1` JSON.
 - **Price this run** (`Run > Price this run...`) recomputes cost from the run's own record
   against opentine's pricing catalog, as of a date you choose, and reports the catalog it used
   and whether anything signed it — an overlay in the working directory or the user config is

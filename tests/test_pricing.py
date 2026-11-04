@@ -639,8 +639,14 @@ def test_a_step_recorded_unmetered_says_so_rather_than_only_unknown() -> None:
     quote = pricing.quote_run(Run(id="local", graph=graph, status=RunStatus.completed))
     if not quote.available:
         pytest.skip("no pricing catalog available")
-    assert quote.unmetered_at_capture == 1
     lines = pricing.quote_lines(quote)
+    if quote.status_counts.get("unmetered"):
+        # Newer catalogs answer for local servers themselves: a $0 "unmetered"
+        # price is a real answer, and the panel uses the catalog's own word.
+        assert quote.unmetered_at_capture == 0
+        assert any("unmetered" in line for line in lines)
+        return
+    assert quote.unmetered_at_capture == 1
     assert any("unmetered" in line and "local server" in line for line in lines)
     # And it is still not counted as priced: the catalog answered nothing.
     assert quote.priced == 0

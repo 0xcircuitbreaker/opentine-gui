@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import stat
 import weakref
 from pathlib import Path
 
@@ -34,6 +35,8 @@ from opentine_gui.sources import (
     _short_oid,
     _signature_verdict,
     _verify_integrity_cached,
+    is_v4_document,
+    read_artifact_document,
 )
 from opentine_gui.text import (
     _format_compact,
@@ -323,7 +326,42 @@ def _budget_breach_line(run: Run) -> str:
 # ------------------------------------------------------------------- provenance
 
 
+def _v4_origin(run: Run) -> dict:
+    """What opentine's v4 reader attached to a run it rebuilt, or {}."""
+    origin = getattr(run, "_v4_origin", None)
+    return origin if isinstance(origin, dict) else {}
+
+
+def _upgrade_line(run: Run) -> str:
+    """Where a v4 run was upgraded from (`upgraded_from`, opentine 0.26).
+
+    The record sits inside the v4 root, so integrity covers it - but it is the
+    upgrader's own account of a source this console never sees, and the source
+    signature state in it is a claim made at upgrade time, not a check.
+    """
+    payload = _v4_origin(run).get("payload")
+    record = payload.get("upgraded_from") if isinstance(payload, dict) else None
+    if not isinstance(record, dict):
+        return ""
+    parts = [f"from {_oneline(_truncate(record.get('format') or '?', 24))}"]
+    tool = record.get("tool")
+    if tool:
+        parts.append(f"by {_oneline(_truncate(tool, 40))}")
+    when = record.get("upgraded_at")
+    if when:
+        parts.append(f"at {_oneline(_truncate(when, 40))}")
+    signature = record.get("signature")
+    state = signature.get("state") if isinstance(signature, dict) else None
+    if state:
+        parts.append(f"source signature claimed {_oneline(_truncate(state, 24))}")
+    return f"Upgraded: {', '.join(parts)}"
+
+
 def _format_version_line(run: Run) -> str:
+    if _v4_origin(run):
+        # opentine's v4 reader rebuilds a v2-shaped record, so run.format_version
+        # reads 2 for a file that is in fact a content-addressed v4 bundle.
+        return "Format: v4 (tine-artifact/4)"
     migration = run.metadata.get("migration")
     if isinstance(migration, list) and migration:
         first = migration[0] if isinstance(migration[0], dict) else {}
@@ -422,11 +460,104 @@ def _fork_lineage_lines(run: Run) -> list[str]:
             "Fork provenance is the artifact's own account: it can be checked for "
             "internal consistency, not against the run it names."
         )
+    lines.extend(_fork_edit_lines(metadata))
     reason = metadata.get("fork_reason")
     if reason:
         label = _fork_reason_label(basis, reason, identity_ok=identity is True)
         lines.append(f"{label}: {_oneline(_truncate(reason, 200))}")
     return lines
+
+
+def _fork_edit_lines(metadata: dict) -> list[str]:
+    """An edited fork (opentine 0.28/0.33): which paths of step K were changed.
+
+    The edit record is bound into the fork id, but the edited step was never
+    executed - its output is the original's - which is the one thing a reader
+    of the graph must not miss.
+    """
+    record = metadata.get("edit")
+    if not isinstance(record, dict):
+        return []
+    changes = record.get("changes")
+    paths = [
+        _oneline(_truncate(change.get("path") or "?", 60))
+        for change in (changes if isinstance(changes, list) else [])
+        if isinstance(change, dict)
+    ]
+    step = _oneline(_truncate(record.get("edited_step") or record.get("step") or "?", 40))
+    shown = _joined(paths, 8) if paths else "(no paths recorded)"
+    lines = [f"Edited fork: step {step}, changed {shown}"]
+    if record.get("executed") is False:
+        lines.append("Edited step was NOT executed: its outputs are the original step's.")
+    return lines
+
+
+def _capture_lines(run: Run) -> list[str]:
+    """How the run was captured, and by which agent, as the run itself claims.
+
+    Additive metadata from opentine 0.10-0.32. All of it is written by the
+    recorder and none of it is checked here, so every value is labelled as a
+    claim; `agent_writable` is surfaced loudly because it means the agent could
+    have edited the log it was recorded from.
+    """
+    metadata = run.metadata if isinstance(run.metadata, dict) else {}
+    lines: list[str] = []
+    capture = metadata.get("capture")
+    if isinstance(capture, dict):
+        method = _oneline(_truncate(capture.get("method") or "?", 40))
+        source = capture.get("source_format")
+        text = f"Capture: {method}" + (f" ({_oneline(_truncate(source, 40))})" if source else "")
+        if capture.get("agent_writable"):
+            text += " - the agent could have edited this log"
+        lines.append(text)
+    identity = metadata.get("agent_identity")
+    if isinstance(identity, dict):
+        parts = [
+            _oneline(_truncate(identity.get(name), 48))
+            for name in ("harness", "model", "provider")
+            if identity.get(name)
+        ]
+        ref = identity.get("ref") or identity.get("id")
+        if ref:
+            parts.append(_oneline(_truncate(ref, 48)))
+        if parts:
+            lines.append(f"Agent (claimed): {', '.join(parts)}")
+    originals = metadata.get("file_originals")
+    if isinstance(originals, dict) and originals:
+        lines.append(f"Rewind originals: {len(originals)} file(s) stored")
+    warnings = metadata.get("warnings")
+    if isinstance(warnings, str):
+        warnings = [warnings]
+    if isinstance(warnings, list) and warnings:
+        first = _oneline(_truncate(warnings[0], 160))
+        more = f" (+{len(warnings) - 1} more)" if len(warnings) > 1 else ""
+        lines.append(f"Recorder warning: {first}{more}")
+    return lines
+
+
+def _timestamp_line(path: Path | None) -> str:
+    """RFC 3161 tokens attached beside the run (`tine timestamp attach`, 0.31).
+
+    Only their presence is reported: verifying one needs a TSA root, which is
+    `tine verify --offline --tsa-roots`' job, not this console's.
+    """
+    if path is None:
+        return ""
+    sidecar = path.with_name(path.name + ".timestamps.json")
+    try:
+        info = sidecar.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+            return ""
+        doc = json.loads(sidecar.read_bytes())
+        entries = doc.get("entries") if isinstance(doc, dict) else None
+        if doc.get("kind") != "tine-timestamp-sidecar/1" or not isinstance(entries, list):
+            return "Timestamps: sidecar present but malformed"
+    except Exception:
+        return ""
+    return (
+        f"Timestamps: {len(entries)} RFC 3161 token(s) attached, not verified here"
+        " (tine verify --offline --tsa-roots)"
+    )
 
 
 #: The scheme is read out of the artifact's own JSON, which means parsing the
@@ -437,12 +568,15 @@ _SCHEME_CACHE: dict[tuple, str] = {}
 _SCHEME_CACHE_MAX = 512
 
 
-def _scheme_cached(path: Path, stat_result) -> str:
+def _scheme_cached(path: Path, stat_result) -> tuple[str, bool]:
+    """(signature scheme, whether the file is a format v4 bundle), from one parse."""
     key = _cache_key(path, stat_result, "scheme")
     hit = _SCHEME_CACHE.get(key)
     if hit is not None:
         return hit
-    return _remember(_SCHEME_CACHE, key, signature_scheme(path), _SCHEME_CACHE_MAX)
+    data = read_artifact_document(path)
+    facts = (signature_scheme(data) if isinstance(data, dict) else "", is_v4_document(data))
+    return _remember(_SCHEME_CACHE, key, facts, _SCHEME_CACHE_MAX)
 
 
 def _trust_lines(path: Path | None, *, config=None) -> list[str]:
@@ -455,7 +589,7 @@ def _trust_lines(path: Path | None, *, config=None) -> list[str]:
         return [f"Integrity: unreadable ({e})"]
 
     integrity = _verify_integrity_cached(path, stat_result)
-    scheme = _scheme_cached(path, stat_result)
+    scheme, v4 = _scheme_cached(path, stat_result)
     # A configured key is bound into a fresh closure per call; the verdict cache
     # is keyed by the configuration's fingerprint, so this costs nothing beyond
     # the first check of each file under that key.
@@ -463,8 +597,11 @@ def _trust_lines(path: Path | None, *, config=None) -> list[str]:
     signature = _signature_verdict(path, stat_result, checker, getattr(config, "fingerprint", ""))
     lines = [integrity_line(integrity), signature_line(signature, scheme=scheme)]
     lines.extend(
-        coverage_lines(signature, scheme=scheme, draft=bool(integrity.get("draft")))
+        coverage_lines(signature, scheme=scheme, draft=bool(integrity.get("draft")), v4=v4)
     )
+    timestamps = _timestamp_line(path)
+    if timestamps:
+        lines.append(timestamps)
     problem = getattr(config, "problem", "")
     if problem:
         lines.append(f"Signing key: {_oneline(problem)}")
@@ -510,6 +647,7 @@ def _run_detail_lines(
         f"Status: {run.status.value}",
         f"Created: {_format_timestamp(run.created_at)}",
         _format_version_line(run),
+        *([upgrade] if (upgrade := _upgrade_line(run)) else []),
         f"Steps: {len(run.steps)}",
         f"Step kinds: {_format_counts(kind_counts)}",
         graph_line,
@@ -542,6 +680,7 @@ def _run_detail_lines(
             "Refs: "
             + _joined([f"{_oneline(name)} -> {_oneline(tip)}" for name, tip in run.refs.items()])
         )
+    lines.extend(_capture_lines(run))
     lines.extend(trust or [])
     lines.extend(extra or [])
     if len(run_id) > 32:

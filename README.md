@@ -24,13 +24,12 @@ uv sync
 uv run tine-gui
 ```
 
-Requires Python 3.11+ and [`opentine`](https://github.com/0xcircuitbreaker/opentine) **0.8.0 or
-newer**, which `pip` installs for you. That floor is a correctness requirement, not a
-preference. opentine keeps adding fields inside format v2 — `causal_ids` in 0.7.1, `provider`
-in 0.8.0 — and its reader ignores keys it does not know, so an older library loads a newer
-artifact, drops the field, and destroys it the moment anything saves the run. 0.8.0 is also
-what makes post-hoc pricing, time-of-day rate cards and the unmetered local servers readable
-at all, which is most of what the cost panels say.
+Requires Python 3.11+ and [`opentine`](https://github.com/0xcircuitbreaker/opentine) **0.34.0 or
+newer** (`< 0.35`), which `pip` installs for you. That floor is a correctness requirement, not a
+preference. Since 0.26 every opentine recorder writes compressed **format v4** artifacts signed at
+`tine-sig/3`, which older libraries cannot open at all; before that, opentine kept adding fields
+inside format v2 (`causal_ids` in 0.7.1, `provider` in 0.8.0) that an older reader silently
+dropped on save. Format v1/v2 files and v3 repositories stay readable.
 
 The same problem will recur the next time opentine adds a field, so the console does not rely
 on the floor alone: pause, resume and fork read the file back, name any field this build cannot
@@ -138,7 +137,8 @@ Noto Sans Mono CJK.
 - Plain words are a substring search over ids, prompts, tags, metadata, step payloads and
   recorded providers
 - A field prefix switches to opentine's own grammar, the same one `tine ls` and `tine search`
-  accept: `status:failed`, `model:opus`, `tag:bug`, `cost:>0.01`, `cost:0.01..1`,
+  accept: `status:failed`, `model:opus`, `tag:bug`, `provider:anthropic`,
+  `harness:claude-code`, `cost:>0.01`, `cost:0.01..1`,
   `after:2026-07-01`, `before:`, `text:`
 - DAG search highlights matching steps and `Next match` walks them
 

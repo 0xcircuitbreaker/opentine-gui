@@ -36,6 +36,7 @@ from opentine_gui.sources import (
     open_source,
 )
 from opentine_gui.text import _format_timestamp, _format_value, _mapping_lines, _truncate
+from tests.artifacts import dump_doc, load_doc, save_v2
 
 requires_symlinks = pytest.mark.skipif(
     sys.platform == "win32", reason="creating a symlink on Windows needs a privilege CI lacks"
@@ -228,11 +229,11 @@ def test_load_runs_keeps_newest_of_duplicate_ids_and_reports_the_shadowed_file(
 
 def test_load_runs_flags_integrity_mismatch_but_still_loads(tmp_path: Path) -> None:
     path = tmp_path / "tampered.tine"
-    _make_run("tampered").save(path)
-    raw = json.loads(path.read_text())
+    save_v2(_make_run("tampered"), path)
+    raw = load_doc(path)
     step = next(iter(raw["graph"]["steps"].values()))
     step["outputs"]["result"] = "edited after signing"
-    path.write_text(json.dumps(raw))
+    dump_doc(path, raw)
     runs, errors, _, _ = load_runs(tmp_path)
     assert [r.id for r in runs] == ["tampered"]
     assert any("integrity" in e for e in errors)
@@ -590,7 +591,8 @@ def test_verify_cache_detects_a_size_and_mtime_preserving_tamper(tmp_path: Path)
     # An integrity check exists to catch tampering, and os.utime lets a writer put
     # mtime back after a same-length edit. The cache key must not be fooled by that.
     path = tmp_path / "abc.tine"
-    _make_run("abc").save(path)
+    save_v2(_make_run("abc"), path)
+    dump_doc(path, load_doc(path))  # uncompressed, so one byte can be flipped in place
     before = path.stat()
     assert _verify_integrity_cached(path, before)["ok"]
 
@@ -620,11 +622,11 @@ def test_search_cache_invalidates_when_status_changes_in_place() -> None:
 def test_filters_tolerate_null_model_info(tmp_path: Path) -> None:
     # Third-party .tine files can carry model_info: null; filters must not raise.
     path = tmp_path / "nullmodel.tine"
-    _make_run("nullmodel").save(path)
-    raw = json.loads(path.read_text())
+    save_v2(_make_run("nullmodel"), path)
+    raw = load_doc(path)
     for step in raw["graph"]["steps"].values():
         step["model_info"] = None
-    path.write_text(json.dumps(raw))
+    dump_doc(path, raw)
     runs, _, _, _ = load_runs(tmp_path)
     (run,) = runs
     assert _run_matches_filter(run, "nullmodel")

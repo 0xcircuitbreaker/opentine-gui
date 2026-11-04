@@ -24,6 +24,10 @@ _LINE_BREAKS = re.compile(r"[\r\n\x0b\x0c\x85  ]+")
 #: move a terminal's cursor and confuse a text layout engine.
 _CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f-\x9f]")
 
+#: What `_sanitize` strips from multi-line text: the same controls, except NEL,
+#: which is a line break that `_oneline` and `_indent_block` turn into one.
+_WIDGET_CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f]")
+
 #: Characters that change how the text around them is *laid out* without being
 #: visible themselves: the bidirectional overrides and isolates, the invisible
 #: operators, and the zero-width space and no-break space. A right-to-left
@@ -46,8 +50,11 @@ def _sanitize(s: str) -> str:
     payload blocks, and almost all of them are ASCII.
     """
     if s.isascii():
-        return s
-    return _INVISIBLE.sub("", s.encode("utf-8", "replace").decode("utf-8"))
+        # C0 controls other than tab/newline (ESC sequences, BEL, CR) would
+        # otherwise reach the clipboard through "Copy text"/"Copy panel".
+        return _WIDGET_CONTROLS.sub("", s) if _WIDGET_CONTROLS.search(s) else s
+    cleaned = s.encode("utf-8", "replace").decode("utf-8")
+    return _WIDGET_CONTROLS.sub("", _INVISIBLE.sub("", cleaned))
 
 
 def _oneline(value: object) -> str:
@@ -168,6 +175,8 @@ def _format_age(timestamp: float, *, now: float | None = None) -> str:
         delta = (time.time() if now is None else now) - float(timestamp)
     except (TypeError, ValueError, OverflowError):
         return "-"
+    if delta != delta or delta in (float("inf"), float("-inf")):  # NaN / inf
+        return "-"
     if delta < 0:
         return "future"
     for seconds, suffix in ((86400.0, "d"), (3600.0, "h"), (60.0, "m")):
@@ -180,7 +189,9 @@ def _format_bytes(size: float) -> str:
     """Human file size. Used where a raw byte count would be noise."""
     try:
         value = float(size)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        return "?"
+    if value != value or value < 0 or value == float("inf"):
         return "?"
     for unit in ("B", "KiB", "MiB", "GiB"):
         if value < 1024 or unit == "GiB":

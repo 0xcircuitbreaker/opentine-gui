@@ -25,11 +25,7 @@ def _run(run_id: str, *, status=RunStatus.completed, model="claude-sonnet-4-6",
     graph = Graph()
     graph.add(
         Step(id="s1", parent_ids=[], kind=StepKind.model, inputs={"text": prompt},
-             model_info=model, cost=cost, causal_ids=list(causal),
-             # 0.7.2 has no `Step.provider`; its adapter recorded who served the
-             # call inside the billing calculation, which is where the console
-             # recovers it from.
-             billing={"calculation": {"provider": provider}} if provider else {})
+             model_info=model, cost=cost, causal_ids=list(causal), provider=provider)
     )
     run = Run(id=run_id, graph=graph, status=status, model_info=model,
               user_prompt=prompt, created_at=created or time.time())
@@ -116,18 +112,19 @@ def test_a_causal_id_is_findable_as_free_text() -> None:
     assert _ids(runs, "retrieval-42") == ["linked"]
 
 
-def test_the_grammar_does_not_invent_a_provider_field() -> None:
-    # opentine's parser has no `provider:` predicate. Honouring one here would
-    # make the console and `tine ls` disagree about which runs match, so the
-    # token stays plain text and is searched literally — and the corpus records
-    # the provider on its own, without a "provider:" prefix to match.
+def test_provider_and_harness_filter_like_tine_ls() -> None:
+    # opentine's grammar gained `provider:` and `harness:`. The console has to
+    # honour them the same way `tine ls` does, or the two disagree about which
+    # runs match: provider is a substring of any step's provider.
     runs = [_run("north", provider="bedrock"), _run("south", provider="vertex")]
-    assert _ids(runs, "model:claude") == ["north", "south"]  # both are reachable
-    assert _ids(runs, "provider:bedrock") == []
-    assert _query_error("provider:bedrock") == ""  # plain text, not a typo'd field
-    # Beside a real field it is parsed as a free term, exactly as opentine parses
-    # it: still literal, still matching nothing.
-    assert _ids(runs, "model:claude provider:bedrock") == []
+    assert _ids(runs, "model:claude") == ["north", "south"]
+    assert _ids(runs, "provider:bedrock") == ["north"]
+    assert _ids(runs, "provider:BED") == ["north"]
+    assert _query_error("provider:bedrock") == ""
+    assert _ids(runs, "model:claude provider:vertex") == ["south"]
+    assert _ids(runs, "harness:claude-code") == []
+    runs[0].metadata["harness"] = "claude-code"
+    assert _ids(runs, "harness:claude") == ["north"]
 
 
 # ---- the substring path is preserved ----

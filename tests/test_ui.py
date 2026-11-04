@@ -437,7 +437,8 @@ def test_a_read_only_source_disables_every_write_action(
     gui._apply_snapshot()
     gui._select_entry("run:sha256:abcdef")
     fake_dpg.invoke(_inspect_button(fake_dpg, "s2"))
-    assert fake_dpg.value("source_badge") == "v3 repository (read-only)"
+    badge = fake_dpg.value("source_badge")
+    assert badge.startswith("repository") and badge.endswith("(read-only)")
     for tag in ("btn_pause", "btn_resume", "btn_fork", "menu_pause", "menu_resume", "menu_fork"):
         assert fake_dpg.config(tag)["enabled"] is False, f"{tag} is still live"
     assert fake_dpg.config("menu_refs")["enabled"] is True

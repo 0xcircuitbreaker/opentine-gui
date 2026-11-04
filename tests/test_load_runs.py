@@ -269,7 +269,7 @@ def test_a_v3_repository_goes_to_the_read_only_reader_not_the_glob(tmp_path: Pat
     Repo.init(work)
     runs, errors, sig, paths = load_runs(work)
     assert runs == [] and paths == {}
-    assert any("v3 repository" in e for e in errors)
+    assert any("opentine repository" in e for e in errors)
     assert sig == ()
     # The console no longer stops there: open_source hands a repository to the
     # reader that lists every run in it and refuses every write.

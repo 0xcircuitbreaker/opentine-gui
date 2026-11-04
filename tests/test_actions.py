@@ -477,7 +477,7 @@ def test_a_repository_refuses_pause_resume_and_fork_and_says_why(tmp_path: Path,
     gui._resume_selected()
     gui._fork_selected()
 
-    refusals = [m for m in gui._messages if "v3 repository" in m.text]
+    refusals = [m for m in gui._messages if "opentine repository" in m.text]
     # One row, not three: the log collapses a line repeated back to back and
     # counts it instead, so a refusal that fires on every click cannot push the
     # rest of the log out of reach. The count is the assertion that all three
@@ -499,7 +499,8 @@ def test_a_repository_disables_every_write_action(tmp_path: Path, gui_factory, f
     enabled = {tag: fake_dpg.config(tag)["enabled"] for tag in write_actions}
     assert not any(enabled.values()), enabled
     assert fake_dpg.config("menu_refs")["enabled"] is True, "reading a repository is fine"
-    assert fake_dpg.value("source_badge") == "v3 repository (read-only)"
+    badge = fake_dpg.value("source_badge")
+    assert badge.startswith("repository, objects v") and badge.endswith("(read-only)")
 
 
 def test_exporting_from_a_repository_leaves_the_object_store_alone(tmp_path: Path, gui_factory):
@@ -765,7 +766,7 @@ def test_refs_are_refused_for_a_directory_of_files(tmp_path: Path, gui_factory, 
     _seed(tmp_path)
     gui = _console(gui_factory, tmp_path)
     gui._open_refs()
-    assert "v3 repository concept" in fake_dpg.value("status_bar")
+    assert "a repository concept" in fake_dpg.value("status_bar")
     assert fake_dpg.config("panel_dialog")["show"] is False
 
 
@@ -1127,6 +1128,15 @@ CALLBACK_NAMES: dict[str, str] = {
     "_open_refs": "View > Repository refs...",
     "_open_stats": "View > Statistics...",
     "_open_transcript": "Run > Transcript...",
+    "_open_verify": "Run > Verify offline...",
+    "_on_ctrl_t": "Ctrl+T",
+    "_on_ctrl_d": "Ctrl+D",
+    "_on_ctrl_p": "Ctrl+P",
+    "_on_ctrl_v": "Ctrl+V",
+    "_export_html": "Run > Export as HTML page",
+    "_export_atif": "Run > Export as ATIF JSON",
+    "_run_verify": "Verify in the offline-verification panel",
+    "_copy_verify_json": "Copy JSON in the offline-verification panel",
     "_pause_selected": "the Pause button and Run > Pause",
     "_pick_recent_dir": "choosing a recent directory in the picker",
     "_quit": "File > Quit",

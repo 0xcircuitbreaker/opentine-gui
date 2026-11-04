@@ -82,6 +82,11 @@ def _safe_sibling(runs_dir: Path, run_id: str, suffix: str) -> Path:
     return _safe_run_path(runs_dir, run_id).with_suffix(suffix)
 
 
+def _export_path_with(runs_dir: Path, run_id: str, suffix: str) -> Path:
+    """Where an export in another format lands: <runs_dir>/<id><suffix>, id-safe."""
+    return _safe_sibling(runs_dir, run_id, suffix)
+
+
 def _export_path(runs_dir: Path, run_id: str) -> Path:
     """Where an exported run lands: <runs_dir>/<id>.otel.json, id-safe."""
     return _safe_sibling(runs_dir, run_id, ".otel.json")
@@ -468,6 +473,37 @@ def _is_v3_repository(path: Path) -> bool:
         return False
 
 
+#: A repository descriptor is a few hundred bytes; past this it is not one.
+_MAX_REPO_CONFIG_BYTES = 64 * 1024
+
+
+def repository_object_format(tine_dir: Path) -> int | None:
+    """The object format a repository's `config.json` declares, or None.
+
+    opentine 0.26 writes `"objects": 4` in place of `"format": 3` before the
+    first v4 object. Read with a bound and never trusted beyond an int.
+    """
+    try:
+        config = tine_dir / "config.json"
+        if config.stat().st_size > _MAX_REPO_CONFIG_BYTES:
+            return None
+        data = json.loads(config.read_bytes())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ("objects", "format"):
+        value = data.get(key)
+        if type(value) is int and 0 < value < 100:
+            return value
+    return None
+
+
+def repository_kind(object_format: int | None) -> str:
+    """How a repository is named in the UI: by its object format when known."""
+    return f"repository, objects v{object_format}" if object_format else "repository"
+
+
 def _repository_dir(path: Path) -> Path:
     """The `.tine` object directory for a worktree, or the directory itself."""
     return path / ".tine" if (path / ".tine" / "config.json").is_file() else path
@@ -597,7 +633,7 @@ def load_runs(
         # redirects to heads/main, which would show one run out of many, and
         # Run.save would write a new object and move the branch.
         errors.append(
-            f"{runs_dir.name}: this is an opentine v3 repository; this console "
+            f"{runs_dir.name}: this is an opentine repository; this console "
             "reads loose .tine files (use `tine repo-log` for repositories)"
         )
         return runs, errors, (), paths
@@ -750,8 +786,13 @@ class RepositorySource:
         self.tine_dir = _repository_dir(root)
 
     @property
+    def object_format(self) -> int | None:
+        """The repository's object format (3, or 4 since opentine 0.26), if stated."""
+        return repository_object_format(self.tine_dir)
+
+    @property
     def label(self) -> str:
-        return f"{self.root} (v3 repository)"
+        return f"{self.root} ({repository_kind(self.object_format)})"
 
     def signature(self) -> tuple:
         """Refs plus object shards: what changes when a repository is written to.
@@ -796,7 +837,7 @@ class RepositorySource:
             from opentine.repo import Repo
         except Exception as e:  # pragma: no cover - opentine always ships it
             return Snapshot(
-                kind=self.kind, root=self.root, errors=[f"v3 repositories need opentine: {e}"],
+                kind=self.kind, root=self.root, errors=[f"repositories need opentine: {e}"],
                 writable=False,
             )
         try:
@@ -805,7 +846,7 @@ class RepositorySource:
             return Snapshot(
                 kind=self.kind,
                 root=self.root,
-                errors=[f"{self.root.name}: not a readable v3 repository ({_oneline(e)})"],
+                errors=[f"{self.root.name}: not a readable opentine repository ({_oneline(e)})"],
                 writable=False,
             )
         refs: dict[str, str] = {}

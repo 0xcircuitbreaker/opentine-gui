@@ -597,3 +597,23 @@ def test_sanitize_strips_terminal_escapes_but_keeps_line_structure() -> None:
 
     assert _sanitize("a\x1b[31mb\x07\nc\td") == "a[31mb\nc\td"
     assert _sanitize("é\x1b") == "é"
+
+
+def test_an_oversize_preferences_file_is_not_read(tmp_path: Path, monkeypatch) -> None:
+    from opentine_gui import desktop
+
+    prefs = tmp_path / "preferences.json"
+    prefs.write_text('{"last_dir": "' + "x" * (desktop.MAX_PREFERENCES_BYTES + 10) + '"}')
+    monkeypatch.setenv(desktop.PREFERENCES_ENV, str(prefs))
+    assert desktop._load_preferences() == {}
+
+
+def test_transcript_headings_are_bounded() -> None:
+    from opentine.core import Run
+
+    from opentine_gui.inspectors import _transcript_turns
+
+    run = Run(id="t")
+    run.transcript = [{"role": "r" * 5000, "name": "n" * 5000, "content": "hi"}]
+    (turn,) = _transcript_turns(run)
+    assert len(turn["role"]) <= 40 and len(turn["name"]) <= 80

@@ -2,6 +2,35 @@
 
 All notable changes to opentine-gui are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Verify offline** (`Run > Verify offline...`): opentine's own `tine verify --offline` report
+  for the selected file - digest, signature, upgrade provenance, in-toto attestation, action
+  manifest and optional action policy, RFC 3161 timestamps with optional TSA roots, and a
+  `--strict` toggle. Built by opentine's report builder, so the console and the CLI cannot
+  disagree. The signature row is the console's own verdict under its configured key rather than
+  a second key loader; "Copy JSON" copies the `tine-verify-report/1` document.
+- **Export as HTML page and ATIF JSON** (`Run` menu), beside the OpenTelemetry export. The page
+  is opentine's own `tine view` rendering with a Content-Security-Policy that forbids scripts and
+  remote loads; ATIF is opentine's v1.8 trajectory exporter. Both write atomically and ask before
+  replacing a file.
+- **Shortcuts:** Ctrl+T transcript, Ctrl+D compare, Ctrl+P price, Ctrl+V verify offline (Cmd on
+  macOS), shown in the menus. F1 help now lists every menu.
+- **Repositories are named by object format** ("repository, objects v4") instead of always "v3",
+  read from a bounded `config.json`. The About text names the formats actually supported.
+
+### Security
+
+- The preferences file is not read when it is larger than 1 MiB.
+- Transcript role, name and tool-call id are length-bounded in their headings.
+
+### Changed
+
+- Verify offline on a repository run explains how to verify it instead of being silently
+  greyed out. Typing in the pricing date or verify inputs no longer triggers global shortcuts.
+
 ## [0.4.0] - 2026-11-04
 
 Targets **opentine 0.34.0**, twenty-six releases on from 0.8.0. The release that matters is

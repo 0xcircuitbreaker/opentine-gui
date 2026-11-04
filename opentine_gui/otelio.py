@@ -268,6 +268,19 @@ def write_export(
     # Trailing newline, like `tine export --output`: the document stays one
     # well-formed line-terminated file for anything reading it with `cat`.
     payload = (serialize_document(document) + "\n").encode("utf-8")
+    write_bytes_atomic(target, payload, overwrite=overwrite)
+    return ExportResult(path=target, spans=_span_count(document), bytes=len(payload))
+
+
+def write_bytes_atomic(target: Path, payload: bytes, *, overwrite: bool = False) -> None:
+    """Write `payload` to `target` via a fsynced temporary file and a rename.
+
+    Shared by every export: a crash leaves the previous file or the new one,
+    never a truncated document, and an existing file is replaced only when
+    `overwrite` says so.
+    """
+    if target.exists() and not overwrite:
+        raise FileExistsError(f"refusing to overwrite existing file: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     handle, scratch = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     temporary = Path(scratch)
@@ -287,7 +300,6 @@ def write_export(
         # directory would be picked up by nothing and cleaned by nobody.
         temporary.unlink(missing_ok=True)
         raise
-    return ExportResult(path=target, spans=_span_count(document), bytes=len(payload))
 
 
 def detect_format(path: str | Path) -> str:

@@ -128,7 +128,7 @@ def test_a_v3_worktree_opens_as_a_read_only_repository_source(tmp_path: Path) ->
     assert source.kind == "repository"
     assert source.writable is False
     assert source.tine_dir == worktree / ".tine"
-    assert "v3 repository" in source.label
+    assert "repository, objects v" in source.label
 
 
 def test_a_bare_object_directory_opens_as_a_repository_source(tmp_path: Path) -> None:
@@ -461,7 +461,7 @@ def test_a_directory_that_is_not_a_repository_is_an_error_row(tmp_path: Path) ->
 
     assert snapshot.entries == []
     assert snapshot.writable is False
-    assert any("not a readable v3 repository" in error for error in snapshot.errors)
+    assert any("not a readable opentine repository" in error for error in snapshot.errors)
 
 
 def test_a_corrupt_object_is_an_error_row_and_the_other_runs_still_load(tmp_path: Path) -> None:

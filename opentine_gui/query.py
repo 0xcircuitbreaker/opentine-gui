@@ -28,10 +28,39 @@ except Exception:  # pragma: no cover - depends on the installed opentine
     parse_query = None
 
 
+def _run_agent(run: Run) -> str:
+    """Which agent produced a run, by opentine's own rule (`harness:`, 0.18+).
+
+    The harness name, else the transcript's source format, else the framework,
+    exactly as opentine's index records it, so `harness:claude` here and in
+    `tine ls` select the same runs.
+    """
+    metadata = run.metadata if isinstance(run.metadata, dict) else {}
+    capture = metadata.get("capture")
+    for candidate in (
+        metadata.get("harness"),
+        capture.get("source_format") if isinstance(capture, dict) else None,
+        metadata.get("framework"),
+    ):
+        if isinstance(candidate, str) and candidate:
+            return candidate[:128]
+    return ""
+
+
 #: Field prefixes opentine's own query grammar understands. The grammar only
 #: engages when one of these is present, so a plain multi-word search keeps
 #: behaving as the substring match users already have.
-QUERY_FIELDS = ("status:", "model:", "tag:", "cost:", "after:", "before:", "text:")
+QUERY_FIELDS = (
+    "status:",
+    "model:",
+    "tag:",
+    "cost:",
+    "after:",
+    "before:",
+    "text:",
+    "harness:",
+    "provider:",
+)
 
 
 #: The run filter fires on every keystroke on the render thread and otherwise
@@ -108,8 +137,9 @@ def _matches_parsed_query(run: Run, parsed) -> bool:
     """Evaluate a parsed Query against a loaded run.
 
     Mirrors opentine's own match_entry so the console and `tine ls` agree:
-    tags must all be present, model is a case-insensitive substring, status is
-    exact, cost and created_at are bounds, and every free-text term must appear.
+    tags must all be present, model, harness and provider are case-insensitive
+    substrings, status is exact, cost and created_at are bounds, and every
+    free-text term must appear.
     """
     try:
         tags = {str(t).lower() for t in run.tags}
@@ -129,6 +159,17 @@ def _matches_parsed_query(run: Run, parsed) -> bool:
             return False
         if parsed.before is not None and created > parsed.before:
             return False
+        # `harness:` and `provider:` joined the grammar after 0.8; read them
+        # defensively so an older Query shape simply has no such predicate.
+        harness = getattr(parsed, "harness", None)
+        if harness and str(harness).lower() not in _run_agent(run).lower():
+            return False
+        provider = getattr(parsed, "provider", None)
+        if provider:
+            wanted = str(provider).lower()
+            providers = {str(step.provider or "").lower() for step in run.steps}
+            if not any(wanted in name for name in providers if name):
+                return False
         if parsed.text:
             haystack = _run_search_text(run)
             if not all(str(term).lower() in haystack for term in parsed.text):

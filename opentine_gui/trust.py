@@ -28,7 +28,6 @@ ever returned from here or rendered.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import stat
 from collections.abc import Callable
@@ -38,7 +37,7 @@ from typing import Any
 
 from opentine.core import Run
 
-from opentine_gui.sources import MAX_TINE_BYTES
+from opentine_gui.sources import is_v4_document, read_artifact_document
 from opentine_gui.text import _oneline, _truncate
 
 # opentine's key loaders live in the private `opentine._signing_keys` and reach
@@ -66,7 +65,15 @@ try:
 except Exception:  # pragma: no cover - only reachable against opentine < 0.7.1
     SCHEME_V1, SCHEME_V2 = "tine-sig/1", "tine-sig/2"
 
-_SCHEMES = (SCHEME_V1, SCHEME_V2)
+#: `tine-sig/3` (opentine 0.26) signs a format v4 bundle: the run's root oid,
+#: the annotation head carrying tags and metadata, and the header. It is the
+#: only scheme a v4 file may carry.
+try:
+    from opentine._signing_v4 import SCHEME_V3
+except Exception:  # pragma: no cover - only reachable against opentine < 0.26
+    SCHEME_V3 = "tine-sig/3"
+
+_SCHEMES = (SCHEME_V1, SCHEME_V2, SCHEME_V3)
 
 #: Names a file holding the HMAC secret, or holds the secret itself.
 HMAC_KEY_ENV = "OPENTINE_GUI_HMAC_KEY"
@@ -451,10 +458,9 @@ def _read_artifact(path_or_data: Any) -> Any:
         return path_or_data
     try:
         source = Path(path_or_data)
-        info = source.stat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_TINE_BYTES:
+        if not stat.S_ISREG(source.stat().st_mode):
             return None
-        return json.loads(source.read_bytes())
+        return read_artifact_document(source)
     except Exception:
         # An artifact is untrusted input of any shape and size: a missing file, a
         # directory, a truncated read, deep nesting (RecursionError) and invalid
@@ -463,7 +469,7 @@ def _read_artifact(path_or_data: Any) -> Any:
 
 
 def signature_scheme(path_or_data: Any) -> str:
-    """The scheme an artifact's own signature block names: v1, v2, or "".
+    """The scheme an artifact's own signature block names: v1, v2, v3 or "".
 
     `SignatureResult` does not carry the scheme, and the two schemes sign
     different parts of the file, so the panel has to read it back off the
@@ -474,11 +480,18 @@ def signature_scheme(path_or_data: Any) -> str:
     data = _read_artifact(path_or_data)
     if not isinstance(data, dict):
         return ""
+    if is_v4_document(data):
+        blocks = data.get("signatures")
+        block = blocks[0] if isinstance(blocks, list) and blocks else None
+        scheme = block.get("scheme") if isinstance(block, dict) else None
+        # A v4 bundle may only carry tine-sig/3; opentine refuses anything else.
+        return scheme if scheme == SCHEME_V3 else ""
     metadata = data.get("metadata")
     integrity = metadata.get("integrity") if isinstance(metadata, dict) else None
     block = integrity.get("signature") if isinstance(integrity, dict) else None
     scheme = block.get("scheme") if isinstance(block, dict) else None
-    return scheme if scheme in _SCHEMES else ""
+    # tine-sig/3 exists only inside a v4 bundle; a v2 record naming it is lying.
+    return scheme if scheme in (SCHEME_V1, SCHEME_V2) else ""
 
 
 def _text(verdict: Any, name: str) -> str:
@@ -566,6 +579,24 @@ _V2_SCOPE = (
 _V2_CLAIM = (
     "This block names tine-sig/2, which would cover every metadata key but integrity."
 )
+_V3_SCOPE = (
+    "tine-sig/3 signs the v4 root and the annotation head, so steps, tags and"
+    " metadata are all covered."
+)
+_V3_CLAIM = (
+    "This block names tine-sig/3, which would cover the v4 root and its annotations"
+    " (steps, tags, metadata)."
+)
+#: Format v4 is content-addressed end to end: the reader re-derives every
+#: envelope id and walks the annotation chain, so "integrity ok" there covers
+#: tags and metadata too - but it is still unkeyed.
+_INTEGRITY_SCOPE_V4 = (
+    "Integrity re-derives every object id, tags and metadata included; it is unkeyed,"
+    " so anyone who edits the file can rebuild it."
+)
+_INTEGRITY_SCOPE_V4_SIGNED = (
+    "Integrity re-derives every object id, and the signature above binds them to a key."
+)
 _UNKNOWN_SCOPE = (
     "This signature names no scheme this build knows; assume the narrower tine-sig/1 coverage."
 )
@@ -579,7 +610,9 @@ _ERROR = "The signature block is malformed, so it attests to nothing."
 _DRAFT = "Draft checkpoint: a partial autosave, which opentine refuses to sign."
 
 
-def coverage_lines(verdict: Any, *, scheme: str = "", draft: bool = False) -> list[str]:
+def coverage_lines(
+    verdict: Any, *, scheme: str = "", draft: bool = False, v4: bool = False
+) -> list[str]:
     """What the two rendered verdicts actually cover, in at most three lines.
 
     `verdict` is the *signature* verdict. `draft` is passed separately because it
@@ -610,12 +643,17 @@ def coverage_lines(verdict: Any, *, scheme: str = "", draft: bool = False) -> li
         # the present indicative. For an unchecked one the block is a claim the
         # artifact makes about itself, and the wording says so.
         claimed = state != "verified"
-        if scheme == SCHEME_V2:
+        if scheme == SCHEME_V3:
+            detail.append(_V3_CLAIM if claimed else _V3_SCOPE)
+        elif scheme == SCHEME_V2:
             detail.append(_V2_CLAIM if claimed else _V2_SCOPE)
         elif scheme == SCHEME_V1:
             detail.append(_V1_CLAIM if claimed else _V1_SCOPE)
         else:
             detail.append(_UNKNOWN_SCOPE)
+    if v4 or scheme == SCHEME_V3:
+        signed = state == "verified" and scheme == SCHEME_V3
+        return [*detail[:2], _INTEGRITY_SCOPE_V4_SIGNED if signed else _INTEGRITY_SCOPE_V4]
     covered = state == "verified" and scheme == SCHEME_V2
     return [*detail[:2], _INTEGRITY_SCOPE_SIGNED if covered else _INTEGRITY_SCOPE]
 

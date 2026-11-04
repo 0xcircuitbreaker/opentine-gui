@@ -12,6 +12,8 @@ from pathlib import Path
 
 from opentine.core import Run
 
+from opentine_gui.sources import artifact_format
+
 ROOT = Path(__file__).resolve().parent.parent
 
 #: Written by demo/seed.py on purpose, to exercise the load-error panel.
@@ -21,6 +23,7 @@ CORRUPT_ON_PURPOSE = {"zz-corrupt.tine"}
 def main() -> int:
     failures: list[str] = []
     checked = 0
+    formats: dict[int | None, int] = {}
 
     for path in sorted((ROOT / ".tine_runs").glob("*.tine")):
         checked += 1
@@ -40,7 +43,11 @@ def main() -> int:
             if not result.ok:
                 failures.append(f"{path.name}: integrity {result.reason}")
                 continue
-            print(f"ok  {path.name}  v{run.format_version} {run.status.value} "
+            # Run.format_version is the rebuilt record's version (2 for a v4
+            # bundle), so the on-disk format is read off the file itself.
+            on_disk = artifact_format(path)
+            formats[on_disk] = formats.get(on_disk, 0) + 1
+            print(f"ok  {path.name}  format v{on_disk} {run.status.value} "
                   f"{len(run.steps)} step(s)")
         except Exception as exc:
             failures.append(f"{path.name}: {type(exc).__name__}: {exc}")
@@ -58,6 +65,12 @@ def main() -> int:
             print(f"ok  {legacy.name}  v1 -> v{run.format_version} (migrated)")
         except Exception as exc:
             failures.append(f"{legacy.name}: {type(exc).__name__}: {exc}")
+
+    # The demo must exercise both the current writer and the legacy reader.
+    if checked and not formats.get(4):
+        failures.append("no format v4 fixture - re-run demo/seed.py with opentine >= 0.26")
+    if checked and not formats.get(2):
+        failures.append("no format v2 fixture - demo/seed.py writes demo-legacy-v2.tine")
 
     if not checked:
         failures.append("no fixtures found — expected .tine_runs/*.tine")

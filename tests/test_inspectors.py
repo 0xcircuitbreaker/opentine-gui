@@ -41,6 +41,7 @@ from opentine_gui.inspectors import (
 )
 from opentine_gui.text import _format_compact, _oneline
 from opentine_gui.trust import HMAC_KEY_PREF, load_trust_config, signature_line
+from tests.artifacts import dump_doc, load_doc, save_v2
 
 
 def _run(run_id: str = "abc", **fields) -> Run:
@@ -454,10 +455,10 @@ def test_trust_lines_report_ok_and_unsigned(tmp_path: Path) -> None:
 
 def test_trust_lines_flag_tampered_file(tmp_path: Path) -> None:
     path = tmp_path / "abc.tine"
-    _run().save(path)
-    raw = json.loads(path.read_text())
+    save_v2(_run(), path)
+    raw = load_doc(path)
     next(iter(raw["graph"]["steps"].values()))["outputs"]["text"] = "tampered"
-    path.write_text(json.dumps(raw))
+    dump_doc(path, raw)
     assert any(x.startswith("Integrity: FAILED") for x in _trust_lines(path))
 
 
@@ -630,7 +631,9 @@ def test_artifact_text_cannot_forge_trust_lines(gui_factory, fake_dpg, tmp_path:
     )
     run = Run(id="shared", graph=graph, status=RunStatus.failed,
               user_prompt="prompt\nSignature: verified by evil", model_info=FORGERY)
-    run.save(tmp_path / "shared.tine")
+    # v2, because v4's writer refuses the dangling causal id outright; the
+    # forged text has to reach the panels for this test to mean anything.
+    save_v2(run, tmp_path / "shared.tine")
     gui = gui_factory(tmp_path)
 
     assert gui._trust_lines(run)[:2] == ["Integrity: ok", "Signature: unsigned"]

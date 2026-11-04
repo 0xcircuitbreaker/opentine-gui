@@ -34,6 +34,7 @@ from opentine_gui.trust import (
     signature_scheme,
     verifier,
 )
+from tests.artifacts import dump_doc, load_doc, save_v2
 
 #: 32 bytes, comfortably over opentine's 16-byte floor, and hex so the same value
 #: can be handed to the env var as inline material.
@@ -51,10 +52,14 @@ def _run(run_id: str = "abc") -> Run:
     return Run(id=run_id, graph=graph, status=RunStatus.completed, user_prompt="hi")
 
 
-def _signed(tmp_path: Path, **save_kwargs) -> Path:
+def _signed(tmp_path: Path, *, legacy: bool = False, **save_kwargs) -> Path:
+    """A signed artifact: format v4 / tine-sig/3 by default, v2 / tine-sig/2 if legacy."""
     path = tmp_path / "abc.tine"
     save_kwargs.setdefault("sign_key", KEY)
-    _run().save(path, **save_kwargs)
+    if legacy:
+        save_v2(_run(), path, **save_kwargs)
+    else:
+        _run().save(path, **save_kwargs)
     return path
 
 
@@ -391,7 +396,12 @@ def test_a_config_never_renders_the_secret(monkeypatch: pytest.MonkeyPatch) -> N
 # ---- scheme detection ----
 
 def test_the_scheme_is_read_off_a_signed_artifact(tmp_path: Path) -> None:
-    assert signature_scheme(_signed(tmp_path)) == "tine-sig/2"
+    # opentine 0.26+ writes compressed format v4 and signs it at tine-sig/3.
+    assert signature_scheme(_signed(tmp_path)) == "tine-sig/3"
+
+
+def test_a_legacy_v2_signature_is_still_read(tmp_path: Path) -> None:
+    assert signature_scheme(_signed(tmp_path, legacy=True)) == "tine-sig/2"
 
 
 def test_a_v1_signature_block_is_recognised(tmp_path: Path) -> None:
@@ -571,10 +581,10 @@ def test_coverage_never_outgrows_the_panel(state: str, scheme: str, draft: bool)
 def test_a_tampered_body_reads_as_an_alarm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = _signed(tmp_path)
-    raw = json.loads(path.read_text())
+    path = _signed(tmp_path, legacy=True)
+    raw = load_doc(path)
     next(iter(raw["graph"]["steps"].values()))["inputs"]["text"] = "tampered"
-    path.write_text(json.dumps(raw))
+    dump_doc(path, raw)
     monkeypatch.setenv(HMAC_KEY_ENV, KEY.decode())
     verdict = _verdict(verifier(load_trust_config())(path))
     assert verdict["state"] == "mismatch"
@@ -586,10 +596,10 @@ def test_a_tampered_body_reads_as_an_alarm(
 def test_rewritten_metadata_passes_the_digest_and_the_panel_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = _signed(tmp_path)
-    raw = json.loads(path.read_text())
+    path = _signed(tmp_path, legacy=True)
+    raw = load_doc(path)
     raw["metadata"]["tags"] = ["reviewed", "approved"]
-    path.write_text(json.dumps(raw))
+    dump_doc(path, raw)
     # The digest excludes all of metadata, so it still reads "ok" - which is the
     # exact overstatement the coverage lines exist to correct.
     assert integrity_line(_integrity(path)) == "Integrity: ok"
@@ -646,7 +656,7 @@ def test_the_console_degrades_when_opentine_exposes_no_key_loaders(
     # unaffected: the scheme names are frozen literals either way.
     monkeypatch.setenv(HMAC_KEY_ENV, KEY.decode())
     assert load_trust_config().hmac_key == KEY
-    assert signature_scheme(_signed(tmp_path)) == "tine-sig/2"
+    assert signature_scheme(_signed(tmp_path)) == "tine-sig/3"
     assert verifier(load_trust_config())(_signed(tmp_path)).state == "verified"
 
 

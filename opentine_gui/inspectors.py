@@ -357,7 +357,10 @@ def _upgrade_line(run: Run) -> str:
     return f"Upgraded: {', '.join(parts)}"
 
 
-def _format_version_line(run: Run) -> str:
+def _format_version_line(run: Run, on_disk: int | None = None) -> str:
+    if on_disk == 5:
+        # v5 spells the same v4 objects with text blobs; oids and signatures match.
+        return "Format: v5 (tine-artifact/5)"
     if _v4_origin(run):
         # opentine's v4 reader rebuilds a v2-shaped record, so run.format_version
         # reads 2 for a file that is in fact a content-addressed v4 bundle.
@@ -579,6 +582,20 @@ def _scheme_cached(path: Path, stat_result) -> tuple[str, bool]:
     return _remember(_SCHEME_CACHE, key, facts, _SCHEME_CACHE_MAX)
 
 
+_ASSURANCE_CACHE: dict[tuple, str] = {}
+
+
+def _assurance_cached(path: Path, stat_result) -> str:
+    """opentine's verified assurance tier for one file revision (0.39+)."""
+    key = _cache_key(path, stat_result, "assurance")
+    hit = _ASSURANCE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    from opentine_gui.verify import assess
+
+    return _remember(_ASSURANCE_CACHE, key, assess(path), _SCHEME_CACHE_MAX)
+
+
 def _trust_lines(path: Path | None, *, config=None) -> list[str]:
     """Integrity digest, signature state, and what each of them actually covers."""
     if path is None:
@@ -602,6 +619,9 @@ def _trust_lines(path: Path | None, *, config=None) -> list[str]:
     timestamps = _timestamp_line(path)
     if timestamps:
         lines.append(timestamps)
+    assurance = _assurance_cached(path, stat_result)
+    if assurance:
+        lines.append(assurance)
     problem = getattr(config, "problem", "")
     if problem:
         lines.append(f"Signing key: {_oneline(problem)}")
@@ -624,7 +644,11 @@ def _joined(values: list[str], limit: int = MAX_LISTED) -> str:
 
 
 def _run_detail_lines(
-    run: Run, *, trust: list[str] | None = None, extra: list[str] | None = None
+    run: Run,
+    *,
+    trust: list[str] | None = None,
+    extra: list[str] | None = None,
+    on_disk: int | None = None,
 ) -> list[str]:
     """The run inspector, as text. `trust` is injected so this stays pure."""
     kind_counts: dict[str, int] = {}
@@ -646,7 +670,7 @@ def _run_detail_lines(
         f"Model: {_oneline(run.model_info) or '(none)'}",
         f"Status: {run.status.value}",
         f"Created: {_format_timestamp(run.created_at)}",
-        _format_version_line(run),
+        _format_version_line(run, on_disk),
         *([upgrade] if (upgrade := _upgrade_line(run)) else []),
         f"Steps: {len(run.steps)}",
         f"Step kinds: {_format_counts(kind_counts)}",

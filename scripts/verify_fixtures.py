@@ -67,8 +67,10 @@ def main() -> int:
             failures.append(f"{legacy.name}: {type(exc).__name__}: {exc}")
 
     # The demo must exercise both the current writer and the legacy reader.
+    if checked and not formats.get(5):
+        failures.append("no format v5 fixture - re-run demo/seed.py with opentine >= 0.42")
     if checked and not formats.get(4):
-        failures.append("no format v4 fixture - re-run demo/seed.py with opentine >= 0.26")
+        failures.append("no format v4 fixture - demo/seed.py writes demo-v4.tine")
     if checked and not formats.get(2):
         failures.append("no format v2 fixture - demo/seed.py writes demo-legacy-v2.tine")
 

@@ -270,6 +270,9 @@ def is_v4_document(data: Any) -> bool:
 def read_artifact_document(path: Path) -> Any:
     """One `.tine` file parsed the way opentine parses it, or None.
 
+    A v5 file (opentine 0.40+) comes back as the v4 document it spells, exactly
+    as opentine's own reader returns it; `artifact_format` says which it was.
+
     Since opentine 0.11 an artifact may be TINEZ1-compressed, and since 0.26 the
     default writer produces compressed format v4 bundles, so `json.loads` on the
     raw bytes no longer reads most files. opentine's own reader unwraps the
@@ -277,20 +280,47 @@ def read_artifact_document(path: Path) -> Any:
     surrogates — the parser differentials a second, laxer parser here would
     reintroduce. Anything unreadable is None: the caller is an advisory check.
     """
+    return _read_document(path)[0]
+
+
+#: The `kind` a format v5 artifact names (opentine 0.40+, the default writer
+#: since 0.42): v4 with UTF-8 blobs spelled as text. Same oids and signatures.
+V5_KIND = "tine-artifact/5"
+
+
+def _read_document(path: Path) -> tuple[Any, int | None]:
+    """(document as opentine reads it, 5 if the file spelled it as v5 else None)."""
     try:
         info = path.stat()
         if info.st_size > MAX_TINE_BYTES or not stat.S_ISREG(info.st_mode):
-            return None
+            return None, None
         with path.open("rb") as handle:
             raw = handle.read(MAX_TINE_BYTES + 1)
         if len(raw) > MAX_TINE_BYTES:
-            return None
+            return None, None
         if _unwrap is None or _opentine_parse_json is None:
-            return json.loads(raw)
+            return json.loads(raw), None
         # The inflated size is bounded by the same limit as the on-disk size.
-        return _opentine_parse_json(_unwrap(raw, limit=MAX_TINE_BYTES))
+        inflated = _unwrap(raw, limit=MAX_TINE_BYTES)
+        document = _opentine_parse_json(inflated)
     except Exception:
-        return None
+        return None, None
+    # opentine's parser converts v5 to v4 and keeps no trace of it, so the
+    # spelling is checked on the top level of the bytes, not by searching for
+    # the kind string (an annotation could carry that text anywhere).
+    if is_v4_document(document) and V5_KIND.encode() in inflated:
+        try:
+            top = json.loads(inflated)
+            if (
+                isinstance(top, dict)
+                and top.get("kind") == V5_KIND
+                and type(top.get("format_version")) is int
+                and top.get("format_version") == 5
+            ):
+                return document, 5
+        except Exception:
+            pass
+    return document, None
 
 
 def _v4_fields_a_save_would_drop(data: dict[str, Any]) -> tuple[str, ...]:
@@ -435,14 +465,45 @@ def _uncached_fields_a_save_would_drop(path: Path) -> tuple[str, ...]:
 
 
 def artifact_format(path: Path | None) -> int | None:
-    """The on-disk format of one artifact (1, 2 or 4), or None if unreadable.
+    """The on-disk format of one artifact (0, 1, 2, 4 or 5), or None if unreadable.
 
-    `Run.format_version` cannot answer this: opentine's v4 reader hands back a
-    run that reports the v2 record version it was rebuilt as.
+    `Run.format_version` cannot answer this: opentine's v4/v5 reader hands back
+    a run that reports the v2 record version it was rebuilt as. Cached per file
+    revision, since it parses the whole file.
     """
     if path is None:
         return None
-    data = read_artifact_document(path)
+    try:
+        key = _cache_key(path, path.stat(), "format")
+    except OSError:
+        return None
+    if key in _FORMAT_CACHE:
+        return _FORMAT_CACHE[key]
+    return _remember(_FORMAT_CACHE, key, _uncached_artifact_format(path), _DROP_CACHE_MAX)
+
+
+_FORMAT_CACHE: dict[tuple, int | None] = {}
+
+
+def writer_format() -> int:
+    """The format the installed opentine writes on a save (5 by default since 0.42)."""
+    try:
+        from opentine._format_v4 import writer_format as _writer_format
+
+        return int(_writer_format())
+    except Exception:
+        return 4
+
+
+#: The first opentine release that reads each format; shown when a save
+#: would raise a file's format past what an older reader can open.
+MIN_READER = {4: "0.26", 5: "0.40"}
+
+
+def _uncached_artifact_format(path: Path) -> int | None:
+    data, spelled = _read_document(path)
+    if spelled == 5:
+        return 5
     if is_v4_document(data):
         return 4
     if not isinstance(data, dict):
@@ -547,6 +608,7 @@ def reset_caches() -> None:
     _RUN_CACHE.clear()
     _VERIFY_CACHE.clear()
     _DROP_CACHE.clear()
+    _FORMAT_CACHE.clear()
     _REPO_RUN_CACHE.clear()
 
 
@@ -812,6 +874,25 @@ class RepositorySource:
                     except OSError:
                         continue
                     entries.append((str(path.relative_to(refs_dir)), st.st_mtime, st.st_size))
+        except OSError:
+            pass
+        # opentine 0.40 writes each run's objects as one pack, and 0.37's
+        # `gc --pack-refs` folds refs into one file: both are where a new run
+        # lands now, so both are part of what "the repository changed" means.
+        for extra in ("packed-refs",):
+            try:
+                st = (self.tine_dir / extra).stat()
+                entries.append((extra, st.st_mtime, st.st_size))
+            except OSError:
+                pass
+        try:
+            for pack in sorted(os.scandir(self.tine_dir / "packs"), key=lambda e: e.name):
+                if pack.name.endswith((".tidx", ".tpk")):
+                    try:
+                        st = pack.stat()
+                    except OSError:
+                        continue
+                    entries.append((f"packs/{pack.name}", st.st_mtime, st.st_size))
         except OSError:
             pass
         objects = self.tine_dir / "objects"

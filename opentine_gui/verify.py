@@ -34,6 +34,10 @@ except Exception:  # pragma: no cover - only reachable against a foreign opentin
     _build_parser = None
     _build_report = None
     _Check = None
+try:
+    from opentine._assurance import assess as _assess
+except Exception:  # pragma: no cover - opentine < 0.39
+    _assess = None
 
 #: Outcome words, in the order a reader should worry about them.
 _RANK = {"fail": 0, "unavailable-offline": 1, "pass": 2, "not-applicable": 3}
@@ -113,6 +117,40 @@ def _argv(path: Path, options: VerifyOptions) -> list[str]:
     return argv
 
 
+def _report_assurance(report: Any) -> Any:
+    try:
+        return report.as_json().get("assurance")
+    except Exception:
+        return None
+
+
+def assurance_line(assurance: Any) -> str:
+    """opentine's assurance tier (0.39), as one flat row, or "".
+
+    T0 imported, T1 hook-captured, T2 witnessed by a proxy key, T3 witnessed
+    and timestamped. `verified` is computed from signatures and timestamps at
+    check time; `claimed` is what the capture says about itself.
+    """
+    if not isinstance(assurance, dict):
+        return ""
+    verified = _oneline(assurance.get("verified") or "?")[:4]
+    claimed = _oneline(assurance.get("claimed") or "?")[:4]
+    reasons = assurance.get("reasons")
+    why = "; ".join(_oneline(r) for r in reasons[:3]) if isinstance(reasons, list) else ""
+    text = f"Assurance: {verified} verified (claimed {claimed})"
+    return text + (f" - {_truncate(why, 160)}" if why else "")
+
+
+def assess(path: Path) -> str:
+    """The assurance row for one file, without the rest of the report."""
+    if _assess is None:
+        return ""
+    try:
+        return assurance_line(_assess(path))
+    except Exception:
+        return ""
+
+
 def render(report: Any) -> list[str]:
     """Plain rows for a flat text panel, worst outcome first within the order."""
     lines: list[str] = []
@@ -132,8 +170,11 @@ def render(report: Any) -> list[str]:
                 if stamp.get(key)
             )
             lines.append(f"timestamp token: {shown or '(no details)'}")
+    assurance = assurance_line(_report_assurance(report))
     basis = report.authorship if report.ok else None
     lines.append("")
+    if assurance:
+        lines.append(assurance)
     lines.append(
         f"Authorship: {_oneline(basis)}" if basis else
         "Authorship: NOT established (internal consistency only)"

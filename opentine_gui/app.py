@@ -81,6 +81,7 @@ from opentine_gui.query import (
     _run_matches_filter,
 )
 from opentine_gui.sources import (
+    MIN_READER,
     RunEntry,
     Snapshot,
     _export_path,
@@ -95,6 +96,7 @@ from opentine_gui.sources import (
     artifact_format,
     open_source,
     repository_kind,
+    writer_format,
 )
 from opentine_gui.text import (
     _elide_middle,
@@ -752,6 +754,13 @@ class OpentineGUI:
                 dpg.add_menu_item(
                     label="Export as ATIF JSON", callback=self._export_atif, tag="menu_export_atif"
                 )
+                with dpg.menu(label="Export for a tracing tool", tag="menu_export_vendor"):
+                    for fmt in exports.VENDORS:
+                        dpg.add_menu_item(
+                            label=fmt.label,
+                            callback=lambda *_, fmt=fmt: self._export_as(fmt),
+                            tag=f"menu_export_{fmt.key}",
+                        )
             with dpg.menu(label="View"):
                 dpg.add_menu_item(
                     label="Statistics...", callback=self._open_stats, tag="menu_stats"
@@ -1609,6 +1618,10 @@ class OpentineGUI:
             ("menu_export_otel", run is not None and otelio.export_available()),
             ("menu_export_html", run is not None and exports.available(exports.HTML)),
             ("menu_export_atif", run is not None and exports.available(exports.ATIF)),
+            *(
+                (f"menu_export_{fmt.key}", run is not None and exports.available(fmt))
+                for fmt in exports.VENDORS
+            ),
             ("menu_import", self._snapshot.writable and otelio.import_available()),
             ("menu_refs", self._snapshot.kind == "repository"),
             ("menu_diff", can_diff),
@@ -1656,6 +1669,7 @@ class OpentineGUI:
                 else self._repo_trust_lines()
             ),
             extra=extra,
+            on_disk=artifact_format(entry.path) if entry.path else None,
         )
         dpg.set_value("detail_text", self._panel_text(lines))
 
@@ -2331,13 +2345,16 @@ class OpentineGUI:
         dropped = _fields_a_save_would_drop(path)
         upgrade = ""
         on_disk = artifact_format(path)
-        if on_disk is not None and on_disk < 4:
-            # opentine 0.26+ writes format v4 on every save, so this rewrites a
-            # file older opentine releases (< 0.26) can read into one they refuse.
+        target = writer_format()
+        if on_disk is not None and on_disk < target:
+            # The installed opentine writes its default format on every save, so
+            # this rewrites a file older releases can read into one they refuse.
             source = "the legacy 0.1 format" if on_disk == 0 else f"format v{on_disk}"
+            reader = MIN_READER.get(target, "")
             upgrade = (
-                f"This also converts it from {source} to v4, which opentine "
-                "releases before 0.26 cannot open.\n\n"
+                f"This also converts it from {source} to v{target}"
+                + (f", which opentine releases before {reader} cannot open" if reader else "")
+                + ".\n\n"
             )
         if dropped:
             # The artifact was written by a newer opentine than the one loaded

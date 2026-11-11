@@ -56,3 +56,29 @@ def test_the_menu_exports_beside_the_runs_and_asks_before_overwriting(
     gui._confirm_accept()
     gui._export_atif()
     assert (tmp_path / "abc.atif.json").is_file()
+
+
+def test_every_export_is_scrubbed_like_tine_export(tmp_path: Path) -> None:
+    from opentine_gui import otelio
+
+    graph = Graph()
+    graph.add(
+        Step(id="s1", parent_ids=[], kind=StepKind.model, model_info="m",
+             inputs={"text": "my key is sk-ant-api03-" + "A" * 90, "api_key": "hunter2hunter2"})
+    )
+    run = Run(id="r", graph=graph, status=RunStatus.completed, user_prompt="hi")
+    documents = [json.dumps(otelio.export_document(run))]
+    documents += [exports.render(fmt, run, cost="$0").decode() for fmt in exports.FORMATS]
+    for document in documents:
+        assert "sk-ant-api03-AAAA" not in document and "hunter2" not in document
+    assert run.steps[0].inputs["api_key"] == "hunter2hunter2", "the run itself is untouched"
+
+
+@pytest.mark.parametrize("fmt", exports.VENDORS, ids=lambda f: f.key)
+def test_vendor_exports_land_beside_the_runs(fmt, tmp_path: Path, gui_factory) -> None:
+    _run().save(tmp_path / "abc.tine")
+    gui = gui_factory(tmp_path)
+    gui._select_run("abc")
+    gui._export_as(fmt)
+    out = tmp_path / f"abc{fmt.suffix}"
+    assert out.is_file() and json.loads(out.read_text())

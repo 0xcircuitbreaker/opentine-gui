@@ -417,7 +417,11 @@ def test_every_offered_format_is_one_opentine_can_actually_read(tmp_path: Path) 
     for fmt in otelio.IMPORT_FORMATS:
         with pytest.raises(ValueError) as refusal:
             otelio.import_file(empty, fmt=fmt)
-        assert "no trace events" in str(refusal.value)
+        # An empty array is "no events" to a JSON reader and malformed input to
+        # a binary one; either way it is a ValueError with a sentence, never a
+        # foreign exception type escaping into the dialog.
+        message = str(refusal.value)
+        assert "no trace events" in message or f"as {fmt}:" in message, (fmt, message)
 
 
 def test_the_serialized_document_is_the_document(tmp_path: Path) -> None:
@@ -572,3 +576,34 @@ def test_the_serializer_fallback_still_writes_the_document_it_was_given(
     assert result.spans == 3
     assert result.bytes == result.path.stat().st_size
     assert json.loads(result.path.read_text(encoding="utf-8")) == document
+
+
+def test_an_imported_transcript_is_marked_agent_writable_and_never_self_priced(
+    tmp_path: Path,
+) -> None:
+    from opentine_gui.inspectors import _capture_lines
+
+    source = tmp_path / "session.jsonl"
+    source.write_text(
+        "\n".join(
+            json.dumps(line)
+            for line in (
+                {"type": "user", "uuid": "u1", "sessionId": "s",
+                 "timestamp": "2026-11-01T00:00:00Z",
+                 "message": {"role": "user", "content": "hello"}},
+                {"type": "assistant", "uuid": "a1", "parentUuid": "u1", "sessionId": "s",
+                 "timestamp": "2026-11-01T00:00:01Z", "costUSD": 99.0,
+                 "message": {"role": "assistant", "model": "claude-opus-5",
+                             "content": [{"type": "text", "text": "hi"}],
+                             "usage": {"input_tokens": 10, "output_tokens": 2}}},
+            )
+        ),
+        encoding="utf-8",
+    )
+    if "claude-code-transcript" not in otelio.IMPORT_FORMATS:
+        pytest.skip("this opentine has no Claude Code transcript importer")
+    imported = otelio.import_file(source, fmt="claude-code-transcript")
+    run = imported.run
+    assert run.metadata["capture"]["method"] == "transcript-import"
+    assert any("agent could have edited" in line for line in _capture_lines(run))
+    assert sum(step.cost for step in run.steps) == 0.0, "the file's own cost is not trusted"

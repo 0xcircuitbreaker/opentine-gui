@@ -291,7 +291,12 @@ def test_scanning_a_repository_writes_nothing_to_it(tmp_path: Path) -> None:
     assert _tree(worktree) == before
 
 
-def test_scanning_a_git_checked_out_repository_does_not_heal_its_layout(tmp_path: Path) -> None:
+def test_scanning_a_git_checked_out_repository_does_not_heal_its_layout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # These corrupt a loose object file. opentine 0.40+ packs each run by
+    # default; loose objects are what older repositories hold.
+    monkeypatch.setenv("OPENTINE_RUN_PACK", "0")
     # The mistake this guards against, in the shape it really arrives in: git
     # cannot store an empty directory, so a repository committed to a project
     # arrives with `packs/`, `indexes/`, `logs/` and `refs/tags/` missing, and
@@ -464,7 +469,12 @@ def test_a_directory_that_is_not_a_repository_is_an_error_row(tmp_path: Path) ->
     assert any("not a readable opentine repository" in error for error in snapshot.errors)
 
 
-def test_a_corrupt_object_is_an_error_row_and_the_other_runs_still_load(tmp_path: Path) -> None:
+def test_a_corrupt_object_is_an_error_row_and_the_other_runs_still_load(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # These corrupt a loose object file. opentine 0.40+ packs each run by
+    # default; loose objects are what older repositories hold.
+    monkeypatch.setenv("OPENTINE_RUN_PACK", "0")
     worktree = tmp_path / "project"
     repo = Repo.init(worktree)
     doomed = repo.put_run(_run("doomed", "corrupt me"), ref="heads/main").run_id
@@ -521,7 +531,12 @@ def test_a_dangling_ref_is_called_out(tmp_path: Path) -> None:
 # reset_caches() clears _RUN_CACHE and _VERIFY_CACHE but not _REPO_RUN_CACHE, so
     # 'start from cold' is not cold for a repository: a run object already read is
     # served from memory however the store changed underneath.
-def test_resetting_the_caches_re_reads_a_repository_object(tmp_path: Path) -> None:
+def test_resetting_the_caches_re_reads_a_repository_object(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # These corrupt a loose object file. opentine 0.40+ packs each run by
+    # default; loose objects are what older repositories hold.
+    monkeypatch.setenv("OPENTINE_RUN_PACK", "0")
     worktree = tmp_path / "project"
     repo = Repo.init(worktree)
     oid = repo.put_run(_run("doomed", "read me, then break me"), ref="heads/main").run_id

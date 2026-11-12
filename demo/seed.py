@@ -1,8 +1,9 @@
 """Seed ./.tine_runs with demo runs covering every status, kind, and DAG shape.
 
 Runs are built with the real opentine API and written in the default format of
-the installed opentine (a compressed ``tine-artifact/4`` bundle since opentine
-0.26), so the GUI loads them exactly like runs produced by live agents. One run,
+the installed opentine (a compressed ``tine-artifact/5`` bundle since opentine
+0.42), so the GUI loads them exactly like runs produced by live agents.
+``demo-v4`` is written in format v4 on purpose. One run,
 ``demo-legacy-v2``, is written in the deprecated v2 format on purpose, so the
 console's "this save converts it to v4" question has something to ask about.
 Legacy v1 files are auto-migrated by Run.load; a committed v1 sample lives in
@@ -480,16 +481,24 @@ def main(runs_dir: Path | str = Path(".tine_runs")) -> None:
         legacy.save(runs_dir / "demo-legacy-v2.tine")
     print(f"  wrote {runs_dir / 'demo-legacy-v2.tine'}  [format v2, converted on any save]")
 
+    # And one in format v4, as opentine 0.26-0.41 wrote it (`tine --for-legacy`):
+    # since 0.42 the default is v5, which readers before 0.40 refuse.
+    v4 = completed_linear()
+    v4.run_id = "demo-v4"
+    with write_format(4):
+        v4.save(runs_dir / "demo-v4.tine")
+    print(f"  wrote {runs_dir / 'demo-v4.tine'}  [format v4, readable by opentine 0.26+]")
+
     # Also drop a corrupt file to exercise the load-error path.
     (runs_dir / "zz-corrupt.tine").write_bytes(b"{ not valid json")
     print(f"  wrote {runs_dir / 'zz-corrupt.tine'}  [intentionally corrupt]")
 
     repo_dir = seed_repository(runs_dir.parent / ".tine_repo")
-    print(f"  wrote {repo_dir}  [v3 repository: heads/main, heads/experiment]")
+    print(f"  wrote {repo_dir}  [repository: heads/main, heads/experiment]")
 
     print(f"\nSeeded {runs_dir.resolve()}")
     print(f"  tine-gui {runs_dir}          # the .tine directory")
-    print(f"  tine-gui {repo_dir}   # the same console over a v3 repository")
+    print(f"  tine-gui {repo_dir}   # the same console over a repository")
     print("  OPENTINE_GUI_HMAC_KEY=opentine-gui-demo-signing-key-0001 tine-gui"
           "   # verifies demo-signed.tine")
 

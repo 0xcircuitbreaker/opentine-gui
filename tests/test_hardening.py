@@ -524,7 +524,12 @@ def test_an_override_rate_card_names_its_provider_not_its_shape() -> None:
     assert step_provider(step) == "vllm"
 
 
-def test_a_repository_object_id_is_not_a_cache_key_on_its_own(tmp_path: Path) -> None:
+def test_a_repository_object_id_is_not_a_cache_key_on_its_own(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # These corrupt a loose object file. opentine 0.40+ packs each run by
+    # default; loose objects are what older repositories hold.
+    monkeypatch.setenv("OPENTINE_RUN_PACK", "0")
     # Content addressing makes an oid a permanent name for its bytes, which is
     # why the cache never expires — but it says nothing about which store holds
     # them, and a second repository naming the same oid was served the first
@@ -551,7 +556,12 @@ def test_a_repository_object_id_is_not_a_cache_key_on_its_own(tmp_path: Path) ->
     assert snapshot.entries == [] and snapshot.errors, "the second store must be read, not cached"
 
 
-def test_a_repository_object_corrupted_under_an_open_console_is_noticed(tmp_path: Path) -> None:
+def test_a_repository_object_corrupted_under_an_open_console_is_noticed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # These corrupt a loose object file. opentine 0.40+ packs each run by
+    # default; loose objects are what older repositories hold.
+    monkeypatch.setenv("OPENTINE_RUN_PACK", "0")
     # The trust panel says every object in a repository is content-addressed and
     # verified on read. A cache keyed by object id alone cannot keep that
     # promise: the run stayed on screen, unchanged and unremarked, after its
@@ -599,7 +609,9 @@ def test_sanitize_strips_terminal_escapes_but_keeps_line_structure() -> None:
     assert _sanitize("é\x1b") == "é"
 
 
-def test_an_oversize_preferences_file_is_not_read(tmp_path: Path, monkeypatch) -> None:
+def test_an_oversize_preferences_file_is_not_read(
+    tmp_path: Path, monkeypatch
+) -> None:
     from opentine_gui import desktop
 
     prefs = tmp_path / "preferences.json"

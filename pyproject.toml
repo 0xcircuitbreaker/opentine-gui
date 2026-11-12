@@ -1,6 +1,6 @@
 [project]
 name = "opentine-gui"
-version = "0.4.0"
+version = "0.5.0"
 description = "Desktop GUI for opentine — browse, inspect, compare and fork agent runs"
 readme = "README.md"
 license = "Apache-2.0"
@@ -44,8 +44,10 @@ dependencies = [
     #   0.26   format v4 / tine-sig/3 is the default writer; an older library
     #          cannot open what every current recorder writes
     #   0.33   v4 reads map transcript step ids back, so a fork keeps its turns
-    #   0.34   the catalog this console prices against
-    "opentine>=0.34.0,<0.35",
+    #   0.40   `.tine` v5 and one pack per run; 0.42 makes v5 the default writer
+    #   0.39   assurance tiers and `tine-verify-report/2`
+    #   0.50   the release this console is tested against
+    "opentine>=0.50.0,<0.51",
     "dearpygui>=2.0,<3",
 ]
 

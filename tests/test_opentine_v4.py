@@ -27,6 +27,7 @@ from opentine_gui.sources import (
     artifact_format,
     is_v4_document,
     read_artifact_document,
+    writer_format,
 )
 from opentine_gui.trust import coverage_lines, signature_line, signature_scheme
 from tests.artifacts import save_v2
@@ -49,8 +50,9 @@ def test_a_default_save_is_a_compressed_v4_bundle_the_console_can_read(tmp_path:
     _run().save(path)
     assert not path.read_bytes().startswith(b"{"), "precondition: opentine compresses"
     document = read_artifact_document(path)
+    # opentine 0.42+ writes v5 by default; its reader hands back the v4 document.
     assert is_v4_document(document)
-    assert artifact_format(path) == 4
+    assert artifact_format(path) == writer_format() == 5
 
 
 def test_a_legacy_file_still_reads_as_what_it_is(tmp_path: Path) -> None:
@@ -84,7 +86,7 @@ def test_a_v4_signature_is_tine_sig_3_and_covers_tags_and_metadata(tmp_path: Pat
     assert signature_line(verdict, scheme="tine-sig/3").endswith("(hmac-sha256, tine-sig/3)")
     lines = coverage_lines(verdict, scheme="tine-sig/3", v4=True)
     assert any("steps, tags and metadata are all covered" in line for line in lines)
-    assert lines[-1].startswith("Integrity re-derives every object id")
+    assert any(line.startswith("Integrity re-derives every object id") for line in lines)
     assert "binds them to a key" in lines[-1]
 
 
@@ -112,7 +114,7 @@ def test_the_trust_panel_of_an_unsigned_v4_file_states_v4_scope(tmp_path: Path) 
     _run().save(path)
     lines = _trust_lines(path)
     assert lines[:2] == ["Integrity: ok", "Signature: unsigned"]
-    assert lines[-1].startswith("Integrity re-derives every object id")
+    assert any(line.startswith("Integrity re-derives every object id") for line in lines)
 
 
 def test_timestamp_tokens_beside_a_run_are_reported_not_verified(tmp_path: Path) -> None:
@@ -225,12 +227,12 @@ def test_pausing_a_legacy_file_says_it_will_be_converted_to_v4(
     gui._pause_selected()
     assert gui._modal_open() == "confirm_dialog"
     question = fake_dpg.value("confirm_text")
-    assert "from format v2 to v4" in question and "before 0.26" in question
+    assert "from format v2 to v5" in question and "before 0.40" in question
     assert path.read_bytes() == before, "the question comes before the write"
 
     gui._confirm_accept()
     assert Run.load(path).status == RunStatus.paused
-    assert artifact_format(path) == 4
+    assert artifact_format(path) == 5
 
 
 def test_pausing_a_v4_file_asks_nothing(tmp_path: Path, gui_factory) -> None:
@@ -290,4 +292,39 @@ def test_a_legacy_linear_file_is_named_in_the_conversion_warning(
     assert artifact_format(path) == 0
     gui = gui_factory(tmp_path)
     question = OpentineGUI._signature_at_risk(gui, path)
-    assert "from the legacy 0.1 format to v4" in question
+    assert "from the legacy 0.1 format to v5" in question
+
+
+def test_a_v4_file_is_read_as_v4_and_its_save_announces_v5(
+    tmp_path: Path, gui_factory, fake_dpg, monkeypatch
+) -> None:
+    from opentine._format_v4 import write_format
+
+    path = tmp_path / "abc.tine"
+    with write_format(4):
+        _run(status=RunStatus.running).save(path)
+    assert artifact_format(path) == 4
+    gui = gui_factory(tmp_path)
+    gui._select_run("abc")
+    gui._pause_selected()
+    assert "from format v4 to v5" in fake_dpg.value("confirm_text")
+    gui._confirm_accept()
+    assert artifact_format(path) == 5
+
+
+def test_v5_is_recognised_by_its_top_level_not_by_text_inside_it(tmp_path: Path) -> None:
+    from opentine._format_v4 import write_format
+
+    path = tmp_path / "abc.tine"
+    run = _run()
+    run.metadata["note"] = {"kind": "tine-artifact/5", "format_version": 5}
+    with write_format(4):
+        run.save(path)
+    assert artifact_format(path) == 4
+
+
+def test_the_inspector_names_v5_when_the_file_is_v5(tmp_path: Path, gui_factory, fake_dpg) -> None:
+    _run().save(tmp_path / "abc.tine")
+    gui = gui_factory(tmp_path)
+    gui._select_run("abc")
+    assert "Format: v5 (tine-artifact/5)" in fake_dpg.value("detail_text")

@@ -1135,6 +1135,7 @@ CALLBACK_NAMES: dict[str, str] = {
     "_on_ctrl_v": "Ctrl+V",
     "_export_html": "Run > Export as HTML page",
     "_export_atif": "Run > Export as ATIF JSON",
+    "_export_as": "Run > Export for a tracing tool > (Langfuse, Phoenix, ...)",
     "_run_verify": "Verify in the offline-verification panel",
     "_copy_verify_json": "Copy JSON in the offline-verification panel",
     "_pause_selected": "the Pause button and Run > Pause",

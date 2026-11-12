@@ -2,16 +2,54 @@
 
 All notable changes to opentine-gui are documented here.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-11
+
+Targets **opentine 0.50.0**. Two storage changes in between broke what the console says about
+files and repositories without breaking a single load: v5 became the default `.tine` format, and
+repositories began storing each run as one pack.
+
+**Requires `opentine >= 0.50.0`** (`< 0.51`).
+
+### Fixed
+
+- **New repository runs never appeared.** opentine 0.40 writes each run's objects as one pack in
+  `packs/`, and the console's change detector watched only loose-object directories, so a run
+  recorded into an open repository was never noticed. Packs and `packed-refs` are now watched.
+- **v5 files were reported as v4,** because opentine's reader converts v5 to the v4 document it
+  spells. The console reads the format off the file's top level, shows `Format: v5`, and a
+  save that raises a file's format names the target and the first opentine release that reads
+  it (v5: 0.40).
+
+### Security
+
+- **Exports are scrubbed the way `tine export` scrubs them.** The OpenTelemetry export wrote
+  secrets out in the clear (an API key in prose and an `api_key` field), and ATIF leaked the
+  prose one. Every export now goes through opentine's writer redaction and value redaction
+  first; the run on screen is untouched.
+- **Imports never trust a file's own cost.** Every imported trace goes through opentine's
+  `distrust_source_billing` and `mark_unpriced`, exactly as `tine import` does, and a transcript
+  is recorded with its agent-writable capture marker.
+- A failure inside any opentine importer (a protobuf reader's own error type, for one) is a
+  refusal in the dialog, never an exception escaping the UI.
 
 ### Added
 
+- **Assurance tiers** (opentine 0.39): the trust panel and the Verify offline report show the
+  tier opentine *verifies* (T0 imported, T1 hook-captured, T2 proxy-witnessed, T3 witnessed and
+  timestamped) beside the tier the capture claims.
+- **Export for a tracing tool:** Langfuse, Arize Phoenix, Braintrust and LangSmith ingestion
+  bodies, rendered by opentine's vendor exporters.
+- **Eighteen more import formats**, read by opentine's own `tine import` reader: OTel logs, OTLP
+  protobuf, HAR, agent-trace, ATIF, the four vendor formats, and Claude Code, Codex, Gemini, Qwen,
+  Pi, Hermes, Cline and Roo Code transcripts. Formats that walk a git repository, a SQLite store
+  or a remote agent are deliberately not offered by a file dialog.
+- `demo-v4.tine` joins the demo set; `verify_fixtures.py` requires v2, v4 and v5 fixtures.
 - **Verify offline** (`Run > Verify offline...`): opentine's own `tine verify --offline` report
   for the selected file - digest, signature, upgrade provenance, in-toto attestation, action
   manifest and optional action policy, RFC 3161 timestamps with optional TSA roots, and a
   `--strict` toggle. Built by opentine's report builder, so the console and the CLI cannot
   disagree. The signature row is the console's own verdict under its configured key rather than
-  a second key loader; "Copy JSON" copies the `tine-verify-report/1` document.
+  a second key loader; "Copy JSON" copies the `tine-verify-report/2` document.
 - **Export as HTML page and ATIF JSON** (`Run` menu), beside the OpenTelemetry export. The page
   is opentine's own `tine view` rendering with a Content-Security-Policy that forbids scripts and
   remote loads; ATIF is opentine's v1.8 trajectory exporter. Both write atomically and ask before
@@ -20,11 +58,6 @@ All notable changes to opentine-gui are documented here.
   macOS), shown in the menus. F1 help now lists every menu.
 - **Repositories are named by object format** ("repository, objects v4") instead of always "v3",
   read from a bounded `config.json`. The About text names the formats actually supported.
-
-### Security
-
-- The preferences file is not read when it is larger than 1 MiB.
-- Transcript role, name and tool-call id are length-bounded in their headings.
 
 ### Changed
 

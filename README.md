@@ -24,12 +24,12 @@ uv sync
 uv run tine-gui
 ```
 
-Requires Python 3.11+ and [`opentine`](https://github.com/0xcircuitbreaker/opentine) **0.34.0 or
-newer** (`< 0.35`), which `pip` installs for you. That floor is a correctness requirement, not a
-preference. Since 0.26 every opentine recorder writes compressed **format v4** artifacts signed at
-`tine-sig/3`, which older libraries cannot open at all; before that, opentine kept adding fields
-inside format v2 (`causal_ids` in 0.7.1, `provider` in 0.8.0) that an older reader silently
-dropped on save. Format v1/v2 files and v3 repositories stay readable.
+Requires Python 3.11+ and [`opentine`](https://github.com/0xcircuitbreaker/opentine) **0.50.0 or
+newer** (`< 0.51`), which `pip` installs for you. That floor is a correctness requirement, not a
+preference. Since 0.42 every opentine recorder writes **format v5** artifacts (v4 with text blobs
+spelled as text), which opentine before 0.40 cannot open, and since 0.40 a repository stores each
+run as one pack, which a console watching only loose objects never sees arrive. Format v1, v2 and
+v4 files and repositories of object format 3 or 4 stay readable.
 
 The same problem will recur the next time opentine adds a field, so the console does not rely
 on the floor alone: pause, resume and fork read the file back, name any field this build cannot

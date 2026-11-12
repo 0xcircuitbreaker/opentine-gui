@@ -114,3 +114,18 @@ def test_shortcuts_open_the_read_panels_and_respect_text_fields(
     monkeypatch.setattr(gui, "_typing", lambda: True)  # Ctrl+V pastes into a field
     gui._on_ctrl_v()
     assert opened[-1] == "_open_verify" and len(opened) == 4
+
+
+def test_assurance_is_reported_as_verified_not_as_claimed(tmp_path: Path) -> None:
+    from opentine_gui.inspectors import _trust_lines
+
+    path = tmp_path / "abc.tine"
+    run = _run()
+    # A capture can claim any tier; only a proxy signature (and a timestamp)
+    # raises the verified one.
+    run.metadata["capture"] = {"method": "transcript-import", "claimed_tier": "T3"}
+    run.save(path)
+    report = verify.verify_offline(path)
+    row = next(line for line in report.lines if line.startswith("Assurance:"))
+    assert row.startswith("Assurance: T0 verified (claimed T3)")
+    assert any(line.startswith("Assurance: T0 verified") for line in _trust_lines(path))

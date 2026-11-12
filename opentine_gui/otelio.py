@@ -122,7 +122,7 @@ _IMPORT_REF = "heads/main"
 #: Formats offered in the import menu, in menu order: this console's own
 #: exports first, then opentine's native records, then the framework logs.
 #: Mirrors `tine import --format`, whose importers do the actual reading.
-IMPORT_FORMATS: tuple[str, ...] = (
+_BASE_FORMATS: tuple[str, ...] = (
     "otel-json",
     "otel-spans",
     "jsonl",
@@ -131,6 +131,57 @@ IMPORT_FORMATS: tuple[str, ...] = (
     "autogen",
     "crewai",
     "openai-agents",
+)
+
+#: Formats opentine 0.40-0.50 added, read by opentine's own `tine import`
+#: reader. Only those that read the one file named: `git-ai` and `entire` walk
+#: a git repository, `opencode-session` opens a SQLite store, and `jules` and
+#: `a2a` describe remote agents - none of which an "import this file" dialog
+#: should reach into.
+_OPENTINE_FILE_FORMATS: tuple[str, ...] = (
+    "otel-logs",
+    "otlp-proto",
+    "otlp-proto-logs",
+    "har",
+    "agent-trace",
+    "atif",
+    "langfuse",
+    "phoenix",
+    "braintrust",
+    "langsmith",
+    "claude-code-transcript",
+    "codex-session",
+    "gemini-session",
+    "qwen-session",
+    "pi-session",
+    "hermes-trajectory",
+    "cline-task",
+    "roo-task",
+)
+
+try:
+    from opentine._cli_import import IMPORT_FORMATS as _OPENTINE_IMPORT_FORMATS
+    from opentine._cli_import_read import detect_and_read as _detect_and_read
+except Exception:  # pragma: no cover - opentine < 0.40
+    _detect_and_read = None
+    _OPENTINE_IMPORT_FORMATS = ()
+try:
+    from opentine._import_billing import distrust_source_billing as _distrust_billing
+    from opentine._import_billing import mark_unpriced as _mark_unpriced
+    from opentine._import_write import record as _opentine_record
+    from opentine.trace._import_detect import TRANSCRIPT_FORMATS as _TRANSCRIPT_FORMATS
+    from opentine.trace._transcript_common import capture_marker as _capture_marker
+except Exception:  # pragma: no cover
+    _distrust_billing = _mark_unpriced = _opentine_record = _capture_marker = None
+    _TRANSCRIPT_FORMATS = ()
+
+#: Formats offered in the import menu, in menu order: this console's own
+#: exports first, then opentine's native records, then the framework logs,
+#: then every single-file format the installed opentine reads.
+IMPORT_FORMATS: tuple[str, ...] = _BASE_FORMATS + tuple(
+    fmt
+    for fmt in _OPENTINE_FILE_FORMATS
+    if _detect_and_read is not None and fmt in _OPENTINE_IMPORT_FORMATS
 )
 
 _NOT_ID = re.compile(r"[^A-Za-z0-9]")
@@ -190,7 +241,10 @@ def export_document(run: Any, *, service_name: str = "") -> dict:
     if _to_otel_genai_document is None:
         raise RuntimeError("this opentine has no OpenTelemetry exporter")
     try:
-        return _to_otel_genai_document(run, service_name=_service_name(service_name))
+        document = _to_otel_genai_document(
+            redacted_copy(run), service_name=_service_name(service_name)
+        )
+        return redact_document(document)
     except (AttributeError, TypeError) as exc:
         # opentine validates a `.tine` as it loads it and coerces a repository
         # run, so a step holding a string where the exporter reads a mapping is
@@ -198,6 +252,36 @@ def export_document(run: Any, *, service_name: str = "") -> dict:
         # even so: export hangs off a menu item, and an AttributeError raised
         # inside a callback takes the window down with it.
         raise ValueError(f"this run cannot be rendered as OpenTelemetry spans: {exc}") from exc
+
+
+def redacted_copy(run: Any) -> Any:
+    """The run as `tine export` sees it: re-scrubbed by opentine's writer redaction.
+
+    A file from before opentine 0.9.1 can hold secrets in prose and under field
+    names the redactor did not know then, and a repository run is stored however
+    it was recorded. Every export leaves the machine, so every export goes
+    through the same scrub the CLI applies - field names included.
+    """
+    try:
+        from opentine._graph_serde import run_from_dict, run_to_dict
+    except Exception as exc:  # pragma: no cover - only against a foreign opentine
+        raise RuntimeError("this opentine cannot redact a run for export") from exc
+    copy = run_from_dict(run_to_dict(run, redact=True), type(run))
+    for name in ("model_info", "system_prompt", "user_prompt"):
+        # run_from_dict rebuilds these from manifest/metadata; keep the redacted
+        # values rather than dropping a field the source run carried.
+        if not getattr(copy, name, "") and getattr(run, name, ""):
+            setattr(copy, name, redact_document(getattr(run, name)))
+    return copy
+
+
+def redact_document(document: Any) -> Any:
+    """opentine's value redaction over a finished export document."""
+    try:
+        from opentine.redaction import redact_value
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("this opentine cannot redact an export") from exc
+    return redact_value(document)
 
 
 def serialize_document(document: dict) -> str:
@@ -456,6 +540,18 @@ def _read_events(source: Path, fmt: str) -> list:
     public ones, so what a foreign file becomes is opentine's decision, not this
     console's.
     """
+    if fmt not in _BASE_FORMATS:
+        # opentine's own reader, bounded by its own limits, after the size and
+        # file-type checks import_file has already made.
+        try:
+            return list(_detect_and_read(str(source), fmt)[1])
+        except (OSError, MemoryError):
+            raise
+        except Exception as exc:
+            # Each importer has its own error type (a protobuf WireError is not a
+            # ValueError); the dialog handles exactly one kind of refusal.
+            reason = _truncate(_oneline(f"{type(exc).__name__}: {exc}"), 200)
+            raise ValueError(f"cannot read {source.name} as {fmt}: {reason}") from exc
     text = _read_text(source)
     if fmt == "jsonl":
         # Lines and not the path. The JSONL importer will happily open a path
@@ -515,7 +611,7 @@ def _bounded_warnings(lines: list[str], dropped: int) -> list[str]:
     return [*kept, f"and {dropped + len(lines) - len(kept)} further warning(s) not listed"]
 
 
-def _record_events(events: list) -> Any:
+def _record_events(events: list, fmt: str = "") -> Any:
     """Record events into a throwaway repository and read the run back out.
 
     The recorder needs somewhere to put content-addressed objects, and an import
@@ -529,6 +625,13 @@ def _record_events(events: list) -> Any:
     """
     with tempfile.TemporaryDirectory(prefix="tine-gui-import-") as scratch:
         repo = _Repo.init(Path(scratch) / "import")
+        if _opentine_record is not None and _distrust_billing is not None:
+            # Exactly what `tine import` does: a source file never sets its own
+            # cost or billing, a model call nothing priced is marked unknown,
+            # and a transcript is recorded as the agent's own, editable account.
+            events = _mark_unpriced(_distrust_billing(events))
+            capture = _capture_marker(fmt) if fmt in _TRANSCRIPT_FORMATS else None
+            return repo.load_run(_opentine_record(repo, events, _IMPORT_REF, capture, fmt))
         recorder = _Recorder.start(repo, ref=_IMPORT_REF, capture=False)
         recorder.import_events(events)
         # Read the run back before the repository around it is deleted.
@@ -608,7 +711,7 @@ def import_file(path: str | Path, *, fmt: str = "", run_id: str = "") -> Importe
         else []
     )
     warnings = _bounded_warnings([*leading, *harvested], dropped)
-    run = _record_events(events)
+    run = _record_events(events, chosen)
     run.run_id = run_id or _derived_run_id(run)
     run.metadata[IMPORT_METADATA_KEY] = {
         "format": chosen,
